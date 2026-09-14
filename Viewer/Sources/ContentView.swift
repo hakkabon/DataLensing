@@ -13,8 +13,11 @@ import DataLensing
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// What the viewer has finished building on a background task.
+/// What the viewer has finished building on a background task. The
+/// controller is retained for the windowed refit policy: future scrolls
+/// ask it `needsRefit(covering:)` instead of fitting again.
 private struct BuiltChart: Sendable {
+    let controller: FitController
     let loaded: LoadedChart
     let fileName: String
 }
@@ -95,7 +98,7 @@ struct ContentView: View {
         work = Task {
             do {
                 let built = try await withThrowingTaskGroup(of: BuiltChart.self) { group in
-                    group.addTask { try scopedLoad(from: url) }
+                    group.addTask { try await scopedLoad(from: url) }
                     guard let first = try await group.next() else {
                         throw CancellationError()
                     }
@@ -112,14 +115,17 @@ struct ContentView: View {
     }
 }
 
-/// Load + fit off the main actor with security-scoped file access.
-/// Free function (not a method) so the task closure captures no `self`.
-private func scopedLoad(from url: URL) throws -> BuiltChart {
+/// Parse instantly, then spend the interactive budget in the
+/// background. Free function (not a method) so the task closure
+/// captures no `self`.
+private func scopedLoad(from url: URL) async throws -> BuiltChart {
     let didAccess = url.startAccessingSecurityScopedResource()
     defer {
         if didAccess { url.stopAccessingSecurityScopedResource() }
     }
-    let loaded = try loadChart(from: url)
+    var controller = try loadController(from: url, budget: .interactive)
     try Task.checkCancellation()
-    return BuiltChart(loaded: loaded, fileName: url.lastPathComponent)
+    let loaded = try await controller.fitConcurrently()
+    try Task.checkCancellation()
+    return BuiltChart(controller: controller, loaded: loaded, fileName: url.lastPathComponent)
 }

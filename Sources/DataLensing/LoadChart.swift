@@ -57,29 +57,15 @@ public struct LoadedChart: Sendable {
 /// flow through `droppingMissing`, so the model's points are the
 /// surviving rows in file order.
 ///
-/// Checks cooperative cancellation between stages, so a pick-away can
-/// abort a large fit without waiting for it.
+/// The sync convenience over `loadController(from:)` + `FitController`
+/// (which the viewer uses directly for background fits). Checks
+/// cooperative cancellation between stages, so a pick-away can abort a
+/// large fit without waiting for it.
 public func loadChart(
-    from url: URL, xColumn: String? = nil, yColumn: String? = nil, gridCount: Int = 200
+    from url: URL, xColumn: String? = nil, yColumn: String? = nil, budget: TuningBudget = .full
 ) throws -> LoadedChart {
-    let table = try CSVTable.load(contentsOf: url)
-    try Task.checkCancellation()
-    let (xName, yName) = try pickColumns(in: table, xColumn: xColumn, yColumn: yColumn)
-    guard let trainX = table.numericMatrix(columns: [xName]),
-          let trainY = table.doubles(forColumn: yName)
-    else {
-        throw ChartLoadError.badColumn("'\(xName)' / '\(yName)'")
-    }
-    guard let (fit, summary) = AutomaticSmoother.fit(
-        trainX: trainX, trainY: trainY, droppingMissing: true
-    ) else {
-        throw ChartLoadError.fitFailed
-    }
-    try Task.checkCancellation()
-    guard let model = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit, gridCount: gridCount) else {
-        throw ChartLoadError.modelFailed
-    }
-    return LoadedChart(model: model, summary: summary, xName: xName, yName: yName)
+    var controller = try loadController(from: url, xColumn: xColumn, yColumn: yColumn, budget: budget)
+    return try controller.fit()
 }
 
 /// Resolve the predictor/response pair (first match wins on duplicates,

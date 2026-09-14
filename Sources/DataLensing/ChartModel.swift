@@ -58,6 +58,43 @@ public struct ChartModel: Sendable {
     public static func make(
         trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200
     ) -> ChartModel? {
+        guard let prepared = prepare(trainX: trainX, trainY: trainY, fit: fit, gridCount: gridCount) else {
+            return nil
+        }
+        let mean = fit.predict(prepared.grid)
+        let optionals = fit.standardErrors(at: prepared.grid)
+        return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
+    }
+
+    /// Concurrent twin of `make`: the grid is evaluated with the
+    /// smoother's concurrent batch paths (identical values, spread over
+    /// the cooperative pool). The viewer path; the sync `make` stays
+    /// for CLI/tests.
+    public static func makeConcurrently(
+        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200
+    ) async throws -> ChartModel? {
+        guard let prepared = prepare(trainX: trainX, trainY: trainY, fit: fit, gridCount: gridCount) else {
+            return nil
+        }
+        let mean = try await fit.predictConcurrently(prepared.grid)
+        let optionals = try await fit.standardErrorsConcurrently(at: prepared.grid)
+        return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
+    }
+
+    // MARK: - Shared core
+
+    /// Validated inputs: surviving points plus the grid. `nil` for the
+    /// same data-dependent reasons `make` returns `nil`.
+    private struct Prepared: Sendable {
+        let xs: [Double]
+        let ys: [Double]
+        let gridX: [Double]
+        let grid: [[Double]]
+    }
+
+    private static func prepare(
+        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int
+    ) -> Prepared? {
         guard gridCount > 0, !fit.keptIndices.isEmpty else { return nil }
         var xs: [Double] = []
         var ys: [Double] = []
@@ -71,18 +108,21 @@ public struct ChartModel: Sendable {
         }
         guard let lo = xs.min(), let hi = xs.max(), hi > lo else { return nil }
         let gridX = (0..<gridCount).map { lo + (hi - lo) * Double($0) / Double(gridCount - 1) }
-        let grid = gridX.map { [$0] }
-        let mean = fit.predict(grid)
-        let optionals = fit.standardErrors(at: grid)
+        return Prepared(xs: xs, ys: ys, gridX: gridX, grid: gridX.map { [$0] })
+    }
+
+    private static func assemble(prepared: Prepared, mean: [Double], se: [Double], gridCount: Int) -> ChartModel? {
         // Nil SEs mean "unavailable here" (width mismatch or a
         // non-polynomial policy refusing to extrapolate) — the band has
         // no honest value at those points, so the build fails rather
         // than inventing one. On the training hull with the default
         // policy this never triggers.
-        let se = optionals.compactMap { $0 }
         guard mean.count == gridCount, se.count == gridCount else { return nil }
         let lower = zip(mean, se).map { $0 - 2 * $1 }
         let upper = zip(mean, se).map { $0 + 2 * $1 }
-        return ChartModel(rawX: xs, rawY: ys, gridX: gridX, mean: mean, lower: lower, upper: upper)
+        return ChartModel(
+            rawX: prepared.xs, rawY: prepared.ys,
+            gridX: prepared.gridX, mean: mean, lower: lower, upper: upper
+        )
     }
 }

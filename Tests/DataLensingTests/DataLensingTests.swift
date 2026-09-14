@@ -72,6 +72,59 @@ private func scratchCSV(_ content: String) throws -> URL {
     #expect(explicit.yName == "time")
 }
 
+@Test func coveragePolicyIsPureHullMargin() throws {
+    let policy = CoveragePolicy(marginFraction: 0.25)
+    let hull = 0.0...10.0  // margined: -2.5...12.5
+    #expect(!policy.needsRefit(hull: hull, visible: 2.0...8.0))
+    #expect(!policy.needsRefit(hull: hull, visible: -2.5...12.5))
+    #expect(policy.needsRefit(hull: hull, visible: -2.6...8.0))
+    #expect(policy.needsRefit(hull: hull, visible: 2.0...12.6))
+    #expect(policy.needsRefit(hull: hull, visible: 20.0...30.0))
+    // Degenerate hulls always refit rather than divide by zero.
+    #expect(policy.needsRefit(hull: 5.0...5.0, visible: 5.0...5.0))
+}
+
+/// Tiny deterministic fixture: y = 2x + 0.5, no missing.
+private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]) {
+    let xs = (0..<n).map { [Double($0)] }
+    let ys = (0..<n).map { 2 * Double($0) + 0.5 }
+    return (xs, ys)
+}
+
+@Test func fitControllerCachesAndCovers() throws {
+    let (trainX, trainY) = linearFixture()
+    var controller = FitController(trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive)
+    #expect(controller.loaded == nil)
+    #expect(controller.needsRefit(covering: 0.0...24.0))  // nothing cached yet
+    let loaded = try controller.fit()
+    #expect(controller.hull == 0.0...24.0)
+    #expect(!controller.needsRefit(covering: 2.0...20.0))
+    #expect(!controller.needsRefit(covering: -6.0...30.0))  // inside 25% margin
+    #expect(controller.needsRefit(covering: -7.0...20.0))
+    #expect(controller.needsRefit(covering: 50.0...60.0))
+    #expect(loaded.model.gridX.count == TuningBudget.interactive.gridCount)
+}
+
+@Test func concurrentModelMatchesSync() async throws {
+    let (trainX, trainY) = linearFixture()
+    guard let (fit, _) = AutomaticSmoother.fit(
+        trainX: trainX, trainY: trainY, spans: [0.5], robustIterations: 1, droppingMissing: true
+    ) else {
+        Issue.record("fit returned nil")
+        return
+    }
+    guard let sync = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit, gridCount: 50),
+          let concurrent = try await ChartModel.makeConcurrently(trainX: trainX, trainY: trainY, fit: fit, gridCount: 50)
+    else {
+        Issue.record("model build returned nil")
+        return
+    }
+    #expect(sync.gridX == concurrent.gridX)
+    #expect(sync.mean == concurrent.mean)
+    #expect(sync.lower == concurrent.lower)
+    #expect(sync.upper == concurrent.upper)
+}
+
 @Test func loadChartRejectsNonNumeric() throws {
     let url = try scratchCSV("a,b\nx,y\np,q\n")
     defer { try? FileManager.default.removeItem(at: url) }
