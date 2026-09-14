@@ -39,6 +39,9 @@ let package = Package(
                 "DataLensing",
                 "DataTables",
                 .product(name: "DataLens", package: "Swift-DataLens"),
+            ],
+            resources: [
+                .copy("SampleData"),
             ]
         ),
         .testTarget(

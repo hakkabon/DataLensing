@@ -6,3 +6,93 @@
 //  Copyright © 2026 hakkabon software. All rights reserved.
 //
 
+// Phase 1 spike (hardcoded): bundled sample CSV → DataTables →
+// AutomaticSmoother → ChartModel → terminal report with an ASCII
+// rendering of raw points vs fitted curve.
+//
+// Sample data: `SampleData/sine.csv`, 1000 rows of sin(x) + N(0, 0.15)
+// on x ∈ [0, 10] with ~2% missing markers, generated deterministically
+// (Python `random.Random(42)`). Regenerate with the one-liner in the
+// Phase 1 notes; the harness asserts the shape it expects.
+//
+// Tuning choices below (single span, one robust iteration) are spike
+// pragmatics for a fast `swift run`, not library policy — the windowed
+// refit policy will own those decisions.
+
+import DataLens
+import DataLensing
+import DataTables
+import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
+@main
+struct DataLensingApp {
+    static func main() {
+        do {
+            try run()
+        } catch {
+            fputs("data-lensing-app: \(error)\n", stderr)
+            exit(1)
+        }
+    }
+
+    static func run() throws {
+        guard let url = Bundle.module.url(
+            forResource: "sine", withExtension: "csv", subdirectory: "SampleData"
+        ) else {
+            fputs("data-lensing-app: bundled SampleData/sine.csv not found\n", stderr)
+            exit(1)
+        }
+        let table = try CSVTable.load(contentsOf: url)
+        guard let trainX = table.numericMatrix(columns: ["x"]),
+              let trainY = table.doubles(forColumn: "y")
+        else {
+            fputs("data-lensing-app: expected numeric x/y columns\n", stderr)
+            exit(1)
+        }
+        guard let (fit, summary) = AutomaticSmoother.fit(
+            trainX: trainX, trainY: trainY, degree: 2,
+            spans: [0.5], robustIterations: 1, droppingMissing: true
+        ) else {
+            fputs("data-lensing-app: fit returned nil\n", stderr)
+            exit(1)
+        }
+        guard let model = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit) else {
+            fputs("data-lensing-app: chart model returned nil\n", stderr)
+            exit(1)
+        }
+
+        let dropped = trainX.count - fit.keptIndices.count
+        print("rows: \(trainX.count), kept: \(fit.keptIndices.count), dropped: \(dropped)")
+        print(summary)
+        print(ascii(model: model, width: 60, height: 15))
+    }
+
+    /// Raw points (`.`, downsampled) vs fitted mean (`*`) on a shared grid.
+    static func ascii(model: ChartModel, width: Int, height: Int) -> String {
+        let allY = model.rawY + model.mean
+        guard let lo = allY.min(), let hi = allY.max(), hi > lo,
+              let xLo = model.rawX.min(), let xHi = model.rawX.max(), xHi > xLo
+        else { return "<empty>" }
+        var canvas = [[Character]](repeating: [Character](repeating: " ", count: width), count: height)
+        func col(_ x: Double) -> Int {
+            min(width - 1, max(0, Int((x - xLo) / (xHi - xLo) * Double(width - 1))))
+        }
+        func row(_ y: Double) -> Int {
+            min(height - 1, max(0, Int((hi - y) / (hi - lo) * Double(height - 1))))
+        }
+        let step = max(1, model.rawX.count / 500)
+        for i in stride(from: 0, to: model.rawX.count, by: step) {
+            canvas[row(model.rawY[i])][col(model.rawX[i])] = "."
+        }
+        for j in model.gridX.indices {
+            canvas[row(model.mean[j])][col(model.gridX[j])] = "*"
+        }
+        return canvas.map { String($0) }.joined(separator: "\n")
+    }
+}
