@@ -76,7 +76,8 @@ public struct FitController: Sendable {
         }
         try Task.checkCancellation()
         guard let model = ChartModel.make(
-            trainX: trainX, trainY: trainY, fit: fit, gridCount: budget.gridCount
+            trainX: trainX, trainY: trainY, fit: fit, gridCount: budget.gridCount,
+            fastAdaptivePrediction: budget.fastAdaptivePrediction
         ) else {
             throw ChartLoadError.modelFailed
         }
@@ -97,7 +98,8 @@ public struct FitController: Sendable {
         }
         try Task.checkCancellation()
         guard let model = try await ChartModel.makeConcurrently(
-            trainX: trainX, trainY: trainY, fit: fit, gridCount: budget.gridCount
+            trainX: trainX, trainY: trainY, fit: fit, gridCount: budget.gridCount,
+            fastAdaptivePrediction: budget.fastAdaptivePrediction
         ) else {
             throw ChartLoadError.modelFailed
         }

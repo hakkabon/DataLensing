@@ -56,13 +56,21 @@ public struct ChartModel: Sendable {
     /// - Returns: `nil` when no rows survive, the grid is empty, or the
     ///   fit reports no `keptIndices` (data-dependent failures, never traps).
     public static func make(
-        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200
+        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200,
+        fastAdaptivePrediction: Bool = false
     ) -> ChartModel? {
         guard let prepared = prepare(trainX: trainX, trainY: trainY, fit: fit, gridCount: gridCount) else {
             return nil
         }
-        let mean = fit.predict(prepared.grid)
-        let optionals = fit.standardErrors(at: prepared.grid)
+        let mean: [Double]
+        let optionals: [Double?]
+        if fastAdaptivePrediction, case .adaptive(let adaptive) = fit {
+            mean = adaptive.predictFast(prepared.grid)
+            optionals = adaptive.standardErrorsFast(at: prepared.grid)
+        } else {
+            mean = fit.predict(prepared.grid)
+            optionals = fit.standardErrors(at: prepared.grid)
+        }
         return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
     }
 
@@ -71,13 +79,21 @@ public struct ChartModel: Sendable {
     /// the cooperative pool). The viewer path; the sync `make` stays
     /// for CLI/tests.
     public static func makeConcurrently(
-        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200
+        trainX: [[Double]], trainY: [Double], fit: FittedSmoother, gridCount: Int = 200,
+        fastAdaptivePrediction: Bool = false
     ) async throws -> ChartModel? {
         guard let prepared = prepare(trainX: trainX, trainY: trainY, fit: fit, gridCount: gridCount) else {
             return nil
         }
-        let mean = try await fit.predictConcurrently(prepared.grid)
-        let optionals = try await fit.standardErrorsConcurrently(at: prepared.grid)
+        let mean: [Double]
+        let optionals: [Double?]
+        if fastAdaptivePrediction, case .adaptive(let adaptive) = fit {
+            mean = try await adaptive.predictFastConcurrently(prepared.grid)
+            optionals = try await adaptive.standardErrorsFastConcurrently(at: prepared.grid)
+        } else {
+            mean = try await fit.predictConcurrently(prepared.grid)
+            optionals = try await fit.standardErrorsConcurrently(at: prepared.grid)
+        }
         return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
     }
 

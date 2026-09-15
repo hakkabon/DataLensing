@@ -125,6 +125,35 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(sync.upper == concurrent.upper)
 }
 
+@Test func budgetPresetsCarryFastFlag() {
+    #expect(TuningBudget.interactive.fastAdaptivePrediction)
+    #expect(!TuningBudget.full.fastAdaptivePrediction)
+}
+
+@Test func fastAdaptiveModelAgreesWithExact() throws {
+    let (trainX, trainY) = linearFixture()
+    guard let adaptive = AdaptiveLoess.fit(trainX: trainX, trainY: trainY, degree: 2, robustIterations: 1) else {
+        Issue.record("adaptive fit returned nil")
+        return
+    }
+    let fit = FittedSmoother.adaptive(adaptive)
+    guard let exact = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit, gridCount: 50),
+          let fast = ChartModel.make(
+              trainX: trainX, trainY: trainY, fit: fit, gridCount: 50, fastAdaptivePrediction: true
+          )
+    else {
+        Issue.record("model build returned nil")
+        return
+    }
+    #expect(exact.gridX == fast.gridX)
+    for (a, b) in zip(exact.mean, fast.mean) {
+        #expect(abs(a - b) <= 1e-9)
+    }
+    for (a, b) in zip(exact.lower, fast.lower) {
+        #expect(abs(a - b) <= 1e-9)
+    }
+}
+
 @Test func loadChartRejectsNonNumeric() throws {
     let url = try scratchCSV("a,b\nx,y\np,q\n")
     defer { try? FileManager.default.removeItem(at: url) }

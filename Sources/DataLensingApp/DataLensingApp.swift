@@ -19,9 +19,7 @@
 // pragmatics for a fast `swift run`, not library policy — the windowed
 // refit policy will own those decisions.
 
-import DataLens
 import DataLensing
-import DataTables
 import Foundation
 
 #if canImport(Darwin)
@@ -48,28 +46,14 @@ struct DataLensingApp {
             fputs("data-lensing-app: bundled SampleData/sine.csv not found\n", stderr)
             exit(1)
         }
-        let table = try CSVTable.load(contentsOf: url)
-        guard let trainX = table.numericMatrix(columns: ["x"]),
-              let trainY = table.doubles(forColumn: "y")
-        else {
-            fputs("data-lensing-app: expected numeric x/y columns\n", stderr)
-            exit(1)
-        }
-        guard let (fit, summary) = AutomaticSmoother.fit(
-            trainX: trainX, trainY: trainY, degree: 2,
-            spans: [0.5], robustIterations: 1, droppingMissing: true
-        ) else {
-            fputs("data-lensing-app: fit returned nil\n", stderr)
-            exit(1)
-        }
-        guard let model = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit) else {
-            fputs("data-lensing-app: chart model returned nil\n", stderr)
-            exit(1)
-        }
+        // The viewer-equivalent path: interactive budget, fast adaptive
+        // grids. Tuning choices live in TuningBudget, not here.
+        let loaded = try loadChart(from: url, budget: .interactive)
+        let model = loaded.model
+        let kept = model.rawX.count
 
-        let dropped = trainX.count - fit.keptIndices.count
-        print("rows: \(trainX.count), kept: \(fit.keptIndices.count), dropped: \(dropped)")
-        print(summary)
+        print("rows kept: \(kept) (dropped rows are missing markers)")
+        print(loaded.summary)
         print(ascii(model: model, width: 60, height: 15))
     }
 

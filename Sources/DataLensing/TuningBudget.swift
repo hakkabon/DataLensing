@@ -14,6 +14,12 @@ import Foundation
 /// default spans with adaptive-vs-fixed competition); an explicit list
 /// still runs the adaptive contender once — the budget trims the fixed
 /// spans and robustness passes, not the competition itself.
+///
+/// `fastAdaptivePrediction` routes adaptive grid evaluation through the
+/// borrowed-bandwidth fast paths (upstream bench: ~25× means, ~45× SEs,
+/// agreement inside half the noise scale). Exact by default; on for the
+/// interactive preset, where a 60 Hz scroll matters more than the third
+/// decimal.
 public struct TuningBudget: Sendable, Hashable {
     /// Local-polynomial degree (0...2, mirroring the smoothers).
     public var degree: Int
@@ -23,18 +29,25 @@ public struct TuningBudget: Sendable, Hashable {
     public var robustIterations: Int
     /// Evaluation-grid points per curve build.
     public var gridCount: Int
+    /// Borrowed-bandwidth adaptive grids (approximation, documented above).
+    public var fastAdaptivePrediction: Bool
 
     /// Full quality: library-default tuning, the 0.1.0–0.3.0 behavior.
     public static let full = TuningBudget(
-        degree: 2, spans: nil, robustIterations: 4, gridCount: 200
+        degree: 2, spans: nil, robustIterations: 4, gridCount: 200,
+        fastAdaptivePrediction: false
     )
-    /// Interactive: one fixed span, one robust pass. Same competition,
-    /// a fraction of the spend — the viewer default.
+    /// Interactive: one fixed span, one robust pass, fast adaptive grids.
+    /// Same competition, a fraction of the spend — the viewer default.
     public static let interactive = TuningBudget(
-        degree: 2, spans: [0.5], robustIterations: 1, gridCount: 200
+        degree: 2, spans: [0.5], robustIterations: 1, gridCount: 200,
+        fastAdaptivePrediction: true
     )
 
-    public init(degree: Int = 2, spans: [Double]? = nil, robustIterations: Int = 4, gridCount: Int = 200) {
+    public init(
+        degree: Int = 2, spans: [Double]? = nil, robustIterations: Int = 4,
+        gridCount: Int = 200, fastAdaptivePrediction: Bool = false
+    ) {
         precondition((0...2).contains(degree), "degree must be 0, 1, or 2")
         if let spans {
             precondition(!spans.isEmpty, "spans must be non-empty when provided")
@@ -46,5 +59,6 @@ public struct TuningBudget: Sendable, Hashable {
         self.spans = spans
         self.robustIterations = robustIterations
         self.gridCount = gridCount
+        self.fastAdaptivePrediction = fastAdaptivePrediction
     }
 }
