@@ -257,6 +257,18 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
 @Test func budgetPresetsCarryFastFlag() {
     #expect(TuningBudget.interactive.fastAdaptivePrediction)
     #expect(!TuningBudget.full.fastAdaptivePrediction)
+    #expect(!TuningBudget.interactive.adaptiveContender)
+    #expect(TuningBudget.full.adaptiveContender)
+}
+
+@Test func interactiveBudgetSkipsAdaptiveContender() throws {
+    let (trainX, trainY) = linearFixture()
+    var controller = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
+    )
+    let loaded = try controller.fit()
+    #expect(loaded.summary.smoother == "Loess")
+    #expect(loaded.summary.reason.contains("adaptive contender disabled"))
 }
 
 @Test func decimationBoundsCountAndKeepsEnvelope() {

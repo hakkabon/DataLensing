@@ -20,6 +20,11 @@ import Foundation
 /// agreement inside half the noise scale). Exact by default; on for the
 /// interactive preset, where a 60 Hz scroll matters more than the third
 /// decimal.
+///
+/// `adaptiveContender` mirrors `AutomaticSmoother.fit`: `false` skips
+/// the adaptive leg and tunes fixed-span Loess only (shallow tuning).
+/// Measured 14.1s → 5.2s release on the interactive budget. The fitted
+/// summary always records the skip — shallow fits say they are shallow.
 public struct TuningBudget: Sendable, Hashable {
     /// Local-polynomial degree (0...2, mirroring the smoothers).
     public var degree: Int
@@ -31,22 +36,26 @@ public struct TuningBudget: Sendable, Hashable {
     public var gridCount: Int
     /// Borrowed-bandwidth adaptive grids (approximation, documented above).
     public var fastAdaptivePrediction: Bool
+    /// Whether the adaptive smoother competes in tuning (see above).
+    public var adaptiveContender: Bool
 
     /// Full quality: library-default tuning, the 0.1.0–0.3.0 behavior.
     public static let full = TuningBudget(
         degree: 2, spans: nil, robustIterations: 4, gridCount: 200,
-        fastAdaptivePrediction: false
+        fastAdaptivePrediction: false, adaptiveContender: true
     )
-    /// Interactive: one fixed span, one robust pass, fast adaptive grids.
-    /// Same competition, a fraction of the spend — the viewer default.
+    /// Interactive: one fixed span, one robust pass, fast adaptive grids,
+    /// no adaptive contender. Same routing, a fraction of the spend —
+    /// the viewer default.
     public static let interactive = TuningBudget(
         degree: 2, spans: [0.5], robustIterations: 1, gridCount: 200,
-        fastAdaptivePrediction: true
+        fastAdaptivePrediction: true, adaptiveContender: false
     )
 
     public init(
         degree: Int = 2, spans: [Double]? = nil, robustIterations: Int = 4,
-        gridCount: Int = 200, fastAdaptivePrediction: Bool = false
+        gridCount: Int = 200, fastAdaptivePrediction: Bool = false,
+        adaptiveContender: Bool = true
     ) {
         precondition((0...2).contains(degree), "degree must be 0, 1, or 2")
         if let spans {
@@ -60,5 +69,6 @@ public struct TuningBudget: Sendable, Hashable {
         self.robustIterations = robustIterations
         self.gridCount = gridCount
         self.fastAdaptivePrediction = fastAdaptivePrediction
+        self.adaptiveContender = adaptiveContender
     }
 }

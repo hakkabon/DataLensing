@@ -17,10 +17,10 @@ let package = Package(
         // Swift-NumericCore by revision (see its DECISIONS #9), so any
         // stable-version requirement on Swift-DataLens fails to resolve
         // ("depends on an unstable-version package"). This revision IS
-        // tag 0.6.3 content.
-        // Switch back to `.upToNextMinor(from: "0.6.4")` once upstream
+        // tag 0.6.4 content.
+        // Switch back to `.upToNextMinor(from: "0.6.5")` once upstream
         // tags a release that depends on NumericCore by version.
-        .package(url: "https://github.com/hakkabon/Swift-DataLens.git", revision: "bd0ebb13c7502083f4e89d42612d743e351f7ffd"),
+        .package(url: "https://github.com/hakkabon/Swift-DataLens.git", revision: "eb748017a7ecadb23be73e9184610acc30b5d34e"),
     ],
     targets: [
         .target(

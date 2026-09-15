@@ -159,7 +159,8 @@ public struct FitController: Sendable {
         guard let (fit, summary) = AutomaticSmoother.fit(
             trainX: trainX, trainY: trainY,
             degree: budget.degree, spans: budget.spans,
-            robustIterations: budget.robustIterations, droppingMissing: true
+            robustIterations: budget.robustIterations, droppingMissing: true,
+            adaptiveContender: budget.adaptiveContender
         ) else {
             throw ChartLoadError.fitFailed
         }
@@ -179,7 +180,8 @@ public struct FitController: Sendable {
         guard let (fit, summary) = AutomaticSmoother.fit(
             trainX: trainX, trainY: trainY,
             degree: budget.degree, spans: budget.spans,
-            robustIterations: budget.robustIterations, droppingMissing: true
+            robustIterations: budget.robustIterations, droppingMissing: true,
+            adaptiveContender: budget.adaptiveContender
         ) else {
             throw ChartLoadError.fitFailed
         }
