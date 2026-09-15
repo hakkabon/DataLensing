@@ -1,0 +1,41 @@
+# CI: SPM build + tests everywhere the package claims to run, plus the
+# Xcode viewer where Xcode exists. Linux proves the Foundation-only
+# targets (and the canImport-gated chart view) stay portable.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  spm-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
+          test -n "$XCODE" || { echo "no Xcode 16 on runner"; exit 1; }
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - name: Build (debug)
+        run: swift build
+      - name: Test (debug)
+        run: swift test
+      - name: Build viewer
+        run: >
+          xcodebuild -project Viewer/DataLensingViewer.xcodeproj
+          -scheme DataLensingViewer -configuration Debug build
+
+  spm-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.1"
+      - name: Build (debug)
+        run: swift build
+      - name: Test (debug)
+        run: swift test
