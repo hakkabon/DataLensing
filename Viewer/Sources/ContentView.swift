@@ -20,6 +20,13 @@ private struct BuiltChart: Sendable {
     let controller: FitController
     let loaded: LoadedChart
     let fileName: String
+    let fileURL: URL
+    let columns: [ColumnInfo]
+
+    /// Numeric column names for the pickers, in file order.
+    var numericNames: [String] {
+        columns.filter(\.isNumeric).map(\.name)
+    }
 }
 
 struct ContentView: View {
@@ -34,6 +41,8 @@ struct ContentView: View {
     @State private var showingImporter = false
     @State private var work: Task<Void, Never>?
     @State private var visibleDomain: ClosedRange<Double>?
+    @State private var selectedX: String?
+    @State private var selectedY: String?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -55,6 +64,22 @@ struct ContentView: View {
                 ProgressView("Fitting \(name)…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .ready(let built):
+                HStack {
+                    Picker("X", selection: $selectedX) {
+                        ForEach(built.numericNames, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
+                    Picker("Y", selection: $selectedY) {
+                        ForEach(built.numericNames, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
+                    Spacer()
+                }
+                .pickerStyle(.menu)
+                .onChange(of: selectedX) { _, _ in reselectIfNeeded(built) }
+                .onChange(of: selectedY) { _, _ in reselectIfNeeded(built) }
                 SmootherChartView(
                     model: built.loaded.model,
                     visibleDomain: $visibleDomain,
@@ -131,6 +156,8 @@ struct ContentView: View {
         work?.cancel()
         let name = url.lastPathComponent
         visibleDomain = nil  // stale windows must never decimate new data
+        selectedX = nil
+        selectedY = nil
         phase = .fitting(name)
         work = Task {
             do {
@@ -142,9 +169,40 @@ struct ContentView: View {
                     group.cancelAll()
                     return first
                 }
+                selectedX = built.controller.xName
+                selectedY = built.controller.yName
                 phase = .ready(built)
             } catch is CancellationError {
                 phase = .idle
+            } catch {
+                phase = .failed(String(describing: error))
+            }
+        }
+    }
+
+    /// Refit with the picked columns when they differ from the fitted
+    /// pair. Setting state after a load carries equal values, so this is
+    /// a no-op there — it only fires on real user changes.
+    private func reselectIfNeeded(_ built: BuiltChart) {
+        guard let x = selectedX, let y = selectedY,
+              x != built.controller.xName || y != built.controller.yName
+        else { return }
+        work?.cancel()
+        phase = .fitting("refit \(x) vs \(y)")
+        work = Task {
+            do {
+                let rebuilt = try await withThrowingTaskGroup(of: BuiltChart.self) { group in
+                    group.addTask { try await scopedFit(from: built.fileURL, x: x, y: y) }
+                    guard let first = try await group.next() else {
+                        throw CancellationError()
+                    }
+                    group.cancelAll()
+                    return first
+                }
+                visibleDomain = nil
+                phase = .ready(rebuilt)
+            } catch is CancellationError {
+                phase = .ready(built)
             } catch {
                 phase = .failed(String(describing: error))
             }
@@ -158,8 +216,8 @@ struct ContentView: View {
         phase = .fitting("refit \(built.fileName)")
         work = Task {
             do {
-                let (controller, didRefit) = try await withThrowingTaskGroup(
-                    of: (FitController, Bool).self
+                let result: (controller: FitController, didRefit: Bool) = try await withThrowingTaskGroup(
+                    of: (controller: FitController, didRefit: Bool).self
                 ) { group in
                     group.addTask {
                         var controller = built.controller
@@ -172,12 +230,15 @@ struct ContentView: View {
                     group.cancelAll()
                     return first
                 }
-                guard didRefit, let loaded = controller.loaded else {
+                guard result.didRefit, let loaded = result.controller.loaded else {
                     phase = .ready(built)  // covered or empty: keep showing the cache
                     return
                 }
                 visibleDomain = nil  // re-track against the new hull
-                phase = .ready(BuiltChart(controller: controller, loaded: loaded, fileName: built.fileName))
+                phase = .ready(BuiltChart(
+                    controller: result.controller, loaded: loaded,
+                    fileName: built.fileName, fileURL: built.fileURL, columns: built.columns
+                ))
             } catch is CancellationError {
                 phase = .ready(built)
             } catch {
@@ -195,9 +256,33 @@ private func scopedLoad(from url: URL) async throws -> BuiltChart {
     defer {
         if didAccess { url.stopAccessingSecurityScopedResource() }
     }
+    let columns = try inspectColumns(from: url)
+    try Task.checkCancellation()
     var controller = try loadController(from: url, budget: .interactive)
     try Task.checkCancellation()
     let loaded = try await controller.fitConcurrently()
     try Task.checkCancellation()
-    return BuiltChart(controller: controller, loaded: loaded, fileName: url.lastPathComponent)
+    return BuiltChart(
+        controller: controller, loaded: loaded,
+        fileName: url.lastPathComponent, fileURL: url, columns: columns
+    )
+}
+
+/// Explicit-column twin of `scopedLoad` for picker changes: same
+/// path, policy replaced by the user's choice.
+private func scopedFit(from url: URL, x: String, y: String) async throws -> BuiltChart {
+    let didAccess = url.startAccessingSecurityScopedResource()
+    defer {
+        if didAccess { url.stopAccessingSecurityScopedResource() }
+    }
+    let columns = try inspectColumns(from: url)
+    try Task.checkCancellation()
+    var controller = try loadController(from: url, xColumn: x, yColumn: y, budget: .interactive)
+    try Task.checkCancellation()
+    let loaded = try await controller.fitConcurrently()
+    try Task.checkCancellation()
+    return BuiltChart(
+        controller: controller, loaded: loaded,
+        fileName: url.lastPathComponent, fileURL: url, columns: columns
+    )
 }

@@ -59,6 +59,31 @@ public struct LoadedChart: Sendable {
     }
 }
 
+/// A column preview for pickers: what `inspectColumns(from:)` reports
+/// without fitting anything. Deliberately free of `DataTables` types so
+/// UIs import only DataLensing.
+public struct ColumnInfo: Sendable, Hashable {
+    /// Header name (or `column_<i>` without a header).
+    public let name: String
+    /// Whether the column extracts to `[Double]` (integer or double).
+    public let isNumeric: Bool
+
+    public init(name: String, isNumeric: Bool) {
+        self.name = name
+        self.isNumeric = isNumeric
+    }
+}
+
+/// List a file's columns (names + numeric flags) without fitting: the
+/// cheap half behind column pickers. A second parse happens at fit
+/// time (`loadController`); parse is milliseconds against seconds of
+/// fit, so sharing one table isn't worth the retained memory.
+public func inspectColumns(from url: URL) throws -> [ColumnInfo] {
+    let table = try CSVTable.load(contentsOf: url)
+    try Task.checkCancellation()
+    return table.columns.map { ColumnInfo(name: $0.name, isNumeric: $0.doubles != nil) }
+}
+
 /// Load a CSV file, fit its two numeric columns, and build the chart.
 ///
 /// Column choice: explicit names win; otherwise columns literally named

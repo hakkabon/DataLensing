@@ -125,6 +125,16 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(sync.upper == concurrent.upper)
 }
 
+@Test func inspectColumnsReportsNamesAndNumeric() throws {
+    let url = try scratchCSV("time,height,label\n0,1.0,a\n1,3.0,b\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    #expect(try inspectColumns(from: url) == [
+        ColumnInfo(name: "time", isNumeric: true),
+        ColumnInfo(name: "height", isNumeric: true),
+        ColumnInfo(name: "label", isNumeric: false),
+    ])
+}
+
 @Test func chartWindowOpensOnlyForLargeSeries() {
     #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 1000) == nil)
     #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 4000) == nil)
