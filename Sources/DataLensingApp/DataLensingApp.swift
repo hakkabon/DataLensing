@@ -59,7 +59,12 @@ struct DataLensingApp {
         let kept = model.rawX.count
 
         print("rows kept: \(kept) (dropped rows are missing markers)")
-        print(loaded.summary)
+        print("\(loaded.smootherName) on \(loaded.xName) vs \(loaded.yName)")
+        if let summary = loaded.summary {
+            print(summary)
+        } else {
+            print("Explicit selection: no tuning competition.")
+        }
         print(ascii(model: model, width: 60, height: 15))
     }
 

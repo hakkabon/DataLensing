@@ -32,7 +32,22 @@ public struct CoveragePolicy: Sendable, Hashable {
     }
 }
 
-/// Owns one file's columns, tuning budget, and cached fit.
+/// Which smoother a `FitController` fits: the automatic competition or
+/// one explicit leg. Raw values feed picker labels directly.
+///
+/// Explicit legs take their span from the budget (`spans?.first`, else
+/// 0.5) and skip tuning competition — their `LoadedChart.summary` is
+/// nil, with the choice recorded in `smootherName` instead.
+/// `.kernel` (Nadaraya–Watson) arrives with the upstream
+/// `FittedSmoother` case that can carry it; until then it is absent
+/// rather than half-built.
+public enum SmootherChoice: String, Sendable, Hashable {
+    case automatic = "Auto"
+    case loess = "Loess"
+    case adaptive = "Adaptive"
+}
+
+/// Owns one file's columns, tuning budget, smoother choice, and cached fit.
 ///
 /// - `loadController(from:)` parses and picks columns (milliseconds).
 /// - `fit()` / `fitConcurrently()` spend the budget once and cache.
@@ -44,6 +59,7 @@ public struct FitController: Sendable {
     public let xName: String
     public let yName: String
     public let budget: TuningBudget
+    public let smoother: SmootherChoice
     public private(set) var loaded: LoadedChart?
     /// File-row index per fitted-subset position. Identity after a full
     /// `fit()`; the surviving window after `refit(covering:)`.
@@ -65,13 +81,17 @@ public struct FitController: Sendable {
         return kept.map { windowBase[$0] }
     }
 
-    public init(trainX: [[Double]], trainY: [Double], xName: String, yName: String, budget: TuningBudget = .full) {
+    public init(
+        trainX: [[Double]], trainY: [Double], xName: String, yName: String,
+        budget: TuningBudget = .full, smoother: SmootherChoice = .automatic
+    ) {
         precondition(trainX.count == trainY.count, "trainX and trainY must have equal counts")
         self.trainX = trainX
         self.trainY = trainY
         self.xName = xName
         self.yName = yName
         self.budget = budget
+        self.smoother = smoother
         self.windowBase = Array(trainX.indices)
     }
 
@@ -156,13 +176,36 @@ public struct FitController: Sendable {
     }
 
     private func fittedChart(trainX: [[Double]], trainY: [Double]) throws -> LoadedChart {
-        guard let (fit, summary) = AutomaticSmoother.fit(
-            trainX: trainX, trainY: trainY,
-            degree: budget.degree, spans: budget.spans,
-            robustIterations: budget.robustIterations, droppingMissing: true,
-            adaptiveContender: budget.adaptiveContender
-        ) else {
-            throw ChartLoadError.fitFailed
+        let (fit, summary, name): (FittedSmoother, TuningSummary?, String)
+        switch smoother {
+        case .automatic:
+            guard let tuned = AutomaticSmoother.fit(
+                trainX: trainX, trainY: trainY,
+                degree: budget.degree, spans: budget.spans,
+                robustIterations: budget.robustIterations, droppingMissing: true,
+                adaptiveContender: budget.adaptiveContender
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (tuned.fit, tuned.summary, tuned.summary.smoother)
+        case .loess:
+            let span = budget.spans?.first ?? 0.5
+            guard let loess = Loess.fit(
+                trainX: trainX, trainY: trainY, span: span,
+                degree: budget.degree, robustIterations: budget.robustIterations,
+                droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.loess(loess), nil, "Loess")
+        case .adaptive:
+            guard let adaptive = AdaptiveLoess.fit(
+                trainX: trainX, trainY: trainY, degree: budget.degree,
+                robustIterations: budget.robustIterations, droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.adaptive(adaptive), nil, "AdaptiveLoess")
         }
         try Task.checkCancellation()
         guard let model = ChartModel.make(
@@ -172,18 +215,42 @@ public struct FitController: Sendable {
             throw ChartLoadError.modelFailed
         }
         return LoadedChart(
-            model: model, summary: summary, xName: xName, yName: yName, keptIndices: fit.keptIndices
+            model: model, summary: summary, smootherName: name,
+            xName: xName, yName: yName, keptIndices: fit.keptIndices
         )
     }
 
     private func fittedChartConcurrently(trainX: [[Double]], trainY: [Double]) async throws -> LoadedChart {
-        guard let (fit, summary) = AutomaticSmoother.fit(
-            trainX: trainX, trainY: trainY,
-            degree: budget.degree, spans: budget.spans,
-            robustIterations: budget.robustIterations, droppingMissing: true,
-            adaptiveContender: budget.adaptiveContender
-        ) else {
-            throw ChartLoadError.fitFailed
+        let (fit, summary, name): (FittedSmoother, TuningSummary?, String)
+        switch smoother {
+        case .automatic:
+            guard let tuned = AutomaticSmoother.fit(
+                trainX: trainX, trainY: trainY,
+                degree: budget.degree, spans: budget.spans,
+                robustIterations: budget.robustIterations, droppingMissing: true,
+                adaptiveContender: budget.adaptiveContender
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (tuned.fit, tuned.summary, tuned.summary.smoother)
+        case .loess:
+            let span = budget.spans?.first ?? 0.5
+            guard let loess = Loess.fit(
+                trainX: trainX, trainY: trainY, span: span,
+                degree: budget.degree, robustIterations: budget.robustIterations,
+                droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.loess(loess), nil, "Loess")
+        case .adaptive:
+            guard let adaptive = AdaptiveLoess.fit(
+                trainX: trainX, trainY: trainY, degree: budget.degree,
+                robustIterations: budget.robustIterations, droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.adaptive(adaptive), nil, "AdaptiveLoess")
         }
         try Task.checkCancellation()
         guard let model = try await ChartModel.makeConcurrently(
@@ -193,7 +260,8 @@ public struct FitController: Sendable {
             throw ChartLoadError.modelFailed
         }
         return LoadedChart(
-            model: model, summary: summary, xName: xName, yName: yName, keptIndices: fit.keptIndices
+            model: model, summary: summary, smootherName: name,
+            xName: xName, yName: yName, keptIndices: fit.keptIndices
         )
     }
 }
@@ -202,7 +270,8 @@ public struct FitController: Sendable {
 /// `loadChart(from:)`, so a UI can open instantly and fit in the
 /// background. Column policy matches `loadChart`.
 public func loadController(
-    from url: URL, xColumn: String? = nil, yColumn: String? = nil, budget: TuningBudget = .full
+    from url: URL, xColumn: String? = nil, yColumn: String? = nil,
+    budget: TuningBudget = .full, smoother: SmootherChoice = .automatic
 ) throws -> FitController {
     let table = try CSVTable.load(contentsOf: url)
     try Task.checkCancellation()
@@ -212,5 +281,7 @@ public func loadController(
     else {
         throw ChartLoadError.badColumn("'\(xName)' / '\(yName)'")
     }
-    return FitController(trainX: trainX, trainY: trainY, xName: xName, yName: yName, budget: budget)
+    return FitController(
+        trainX: trainX, trainY: trainY, xName: xName, yName: yName, budget: budget, smoother: smoother
+    )
 }

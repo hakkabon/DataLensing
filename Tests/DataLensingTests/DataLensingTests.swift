@@ -261,14 +261,36 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(TuningBudget.full.adaptiveContender)
 }
 
+@Test func explicitSmootherChoiceSkipsTuningSummary() throws {
+    let (trainX, trainY) = linearFixture()
+    let expectations: [(SmootherChoice, String)] = [(.loess, "Loess"), (.adaptive, "AdaptiveLoess")]
+    for (choice, name) in expectations {
+        var controller = FitController(
+            trainX: trainX, trainY: trainY, xName: "x", yName: "y",
+            budget: .interactive, smoother: choice
+        )
+        let loaded = try controller.fit()
+        #expect(loaded.summary == nil)
+        #expect(loaded.smootherName == name)
+        #expect(controller.keptFileIndices == Array(0..<25))
+        #expect(loaded.model.mean.allSatisfy { $0.isFinite })
+    }
+    // Automatic keeps its summary.
+    var auto = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
+    )
+    #expect(try auto.fit().summary != nil)
+}
+
 @Test func interactiveBudgetSkipsAdaptiveContender() throws {
     let (trainX, trainY) = linearFixture()
     var controller = FitController(
         trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
     )
     let loaded = try controller.fit()
-    #expect(loaded.summary.smoother == "Loess")
-    #expect(loaded.summary.reason.contains("adaptive contender disabled"))
+    #expect(loaded.smootherName == "Loess")
+    #expect(loaded.summary?.smoother == "Loess")
+    #expect(loaded.summary?.reason.contains("adaptive contender disabled") == true)
 }
 
 @Test func decimationBoundsCountAndKeepsEnvelope() {

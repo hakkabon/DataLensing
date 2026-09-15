@@ -43,6 +43,7 @@ struct ContentView: View {
     @State private var visibleDomain: ClosedRange<Double>?
     @State private var selectedX: String?
     @State private var selectedY: String?
+    @State private var selectedSmoother: SmootherChoice = .automatic
     @State private var inspectorX: Double?
     @State private var gate = GenerationGate()
     /// Chart to restore on cancel: nil for fresh opens (→ idle).
@@ -80,11 +81,17 @@ struct ContentView: View {
                             Text(name).tag(Optional(name))
                         }
                     }
+                    Picker("Smoother", selection: $selectedSmoother) {
+                        ForEach([SmootherChoice.automatic, .loess, .adaptive], id: \.self) { choice in
+                            Text(choice.rawValue).tag(choice)
+                        }
+                    }
                     Spacer()
                 }
                 .pickerStyle(.menu)
                 .onChange(of: selectedX) { _, _ in reselectIfNeeded(built) }
                 .onChange(of: selectedY) { _, _ in reselectIfNeeded(built) }
+                .onChange(of: selectedSmoother) { _, _ in reselectIfNeeded(built) }
                 SmootherChartView(
                     model: built.loaded.model,
                     visibleDomain: $visibleDomain,
@@ -116,9 +123,15 @@ struct ContentView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                Text("\(built.loaded.xName) vs \(built.loaded.yName) — \(built.loaded.summary)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let summary = built.loaded.summary {
+                    Text("\(built.loaded.xName) vs \(built.loaded.yName) — \(summary)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(built.loaded.xName) vs \(built.loaded.yName) — explicit \(built.loaded.smootherName), no tuning")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             case .failed(let message):
                 Text(message)
                     .foregroundStyle(.red)
@@ -197,11 +210,12 @@ struct ContentView: View {
         inspectorX = nil
         fallback = nil  // fresh open cancels back to idle
         let generation = gate.next()
+        let smoother = selectedSmoother  // sticky preference across files
         phase = .fitting(name)
         work = Task {
             do {
                 let built = try await withThrowingTaskGroup(of: BuiltChart.self) { group in
-                    group.addTask { try await scopedLoad(from: url) }
+                    group.addTask { try await scopedLoad(from: url, smoother: smoother) }
                     guard let first = try await group.next() else {
                         throw CancellationError()
                     }
@@ -222,21 +236,27 @@ struct ContentView: View {
         }
     }
 
-    /// Refit with the picked columns when they differ from the fitted
-    /// pair. Setting state after a load carries equal values, so this is
-    /// a no-op there — it only fires on real user changes.
+    /// Refit with the picked columns/smoother when they differ from the
+    /// fitted ones. Setting state after a load carries equal values, so
+    /// this is a no-op there — it only fires on real user changes.
     private func reselectIfNeeded(_ built: BuiltChart) {
         guard let x = selectedX, let y = selectedY,
               x != built.controller.xName || y != built.controller.yName
+                || selectedSmoother != built.controller.smoother
         else { return }
         work?.cancel()
         fallback = built  // cancel restores this chart
         let generation = gate.next()
-        phase = .fitting("refit \(x) vs \(y)")
+        let smoother = selectedSmoother  // Sendable copy for the child task
+        phase = .fitting("refit \(x) vs \(y) (\(smoother.rawValue))")
         work = Task {
             do {
                 let rebuilt = try await withThrowingTaskGroup(of: BuiltChart.self) { group in
-                    group.addTask { try await scopedFit(from: built.fileURL, x: x, y: y) }
+                    group.addTask {
+                        try await scopedFit(
+                            from: built.fileURL, x: x, y: y, smoother: smoother
+                        )
+                    }
                     guard let first = try await group.next() else {
                         throw CancellationError()
                     }
@@ -305,14 +325,14 @@ struct ContentView: View {
 /// Parse instantly, then spend the interactive budget in the
 /// background. Free function (not a method) so the task closure
 /// captures no `self`.
-private func scopedLoad(from url: URL) async throws -> BuiltChart {
+private func scopedLoad(from url: URL, smoother: SmootherChoice = .automatic) async throws -> BuiltChart {
     let didAccess = url.startAccessingSecurityScopedResource()
     defer {
         if didAccess { url.stopAccessingSecurityScopedResource() }
     }
     let columns = try inspectColumns(from: url)
     try Task.checkCancellation()
-    var controller = try loadController(from: url, budget: .interactive)
+    var controller = try loadController(from: url, budget: .interactive, smoother: smoother)
     try Task.checkCancellation()
     let loaded = try await controller.fitConcurrently()
     try Task.checkCancellation()
@@ -324,14 +344,18 @@ private func scopedLoad(from url: URL) async throws -> BuiltChart {
 
 /// Explicit-column twin of `scopedLoad` for picker changes: same
 /// path, policy replaced by the user's choice.
-private func scopedFit(from url: URL, x: String, y: String) async throws -> BuiltChart {
+private func scopedFit(
+    from url: URL, x: String, y: String, smoother: SmootherChoice = .automatic
+) async throws -> BuiltChart {
     let didAccess = url.startAccessingSecurityScopedResource()
     defer {
         if didAccess { url.stopAccessingSecurityScopedResource() }
     }
     let columns = try inspectColumns(from: url)
     try Task.checkCancellation()
-    var controller = try loadController(from: url, xColumn: x, yColumn: y, budget: .interactive)
+    var controller = try loadController(
+        from: url, xColumn: x, yColumn: y, budget: .interactive, smoother: smoother
+    )
     try Task.checkCancellation()
     let loaded = try await controller.fitConcurrently()
     try Task.checkCancellation()

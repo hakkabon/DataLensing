@@ -40,19 +40,25 @@ public enum ChartLoadError: Error, Sendable, Hashable, CustomStringConvertible {
 /// `keptIndices` addresses the *fitted subset* (see
 /// `FitController.windowBase`); `FitController.keptFileIndices` composes
 /// both levels into file rows.
+///
+/// `summary` is present exactly when tuning competed (`.automatic`):
+/// explicit choices skip the competition, so there is nothing to report
+/// beyond `smootherName` — a nil summary is the honest record, not a gap.
 public struct LoadedChart: Sendable {
     public let model: ChartModel
-    public let summary: TuningSummary
+    public let summary: TuningSummary?
+    public let smootherName: String
     public let xName: String
     public let yName: String
     public let keptIndices: [Int]
 
     public init(
-        model: ChartModel, summary: TuningSummary,
-        xName: String, yName: String, keptIndices: [Int]
+        model: ChartModel, summary: TuningSummary?,
+        smootherName: String, xName: String, yName: String, keptIndices: [Int]
     ) {
         self.model = model
         self.summary = summary
+        self.smootherName = smootherName
         self.xName = xName
         self.yName = yName
         self.keptIndices = keptIndices
@@ -96,9 +102,12 @@ public func inspectColumns(from url: URL) throws -> [ColumnInfo] {
 /// cooperative cancellation between stages, so a pick-away can abort a
 /// large fit without waiting for it.
 public func loadChart(
-    from url: URL, xColumn: String? = nil, yColumn: String? = nil, budget: TuningBudget = .full
+    from url: URL, xColumn: String? = nil, yColumn: String? = nil,
+    budget: TuningBudget = .full, smoother: SmootherChoice = .automatic
 ) throws -> LoadedChart {
-    var controller = try loadController(from: url, xColumn: xColumn, yColumn: yColumn, budget: budget)
+    var controller = try loadController(
+        from: url, xColumn: xColumn, yColumn: yColumn, budget: budget, smoother: smoother
+    )
     return try controller.fit()
 }
 
