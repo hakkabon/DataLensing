@@ -124,13 +124,31 @@ public struct SmootherChartView: View {
                 RuleMark(x: .value("selected", selected))
                     .foregroundStyle(.primary)
                     .annotation(position: .top, alignment: .center) {
-                        Text("x \(selected, format: .number.precision(.fractionLength(2))) · fit \(fitted, format: .number.precision(.fractionLength(2)))")
-                            .font(.caption)
-                            .padding(4)
-                            .background(.thinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        selectionLabel(x: selected, fitted: fitted)
                     }
             }
+        }
+        .chartXAxis { axisContent }
+        .chartYAxis { axisContent }
+    }
+
+    private func selectionLabel(x: Double, fitted: Double) -> some View {
+        Text("x \(x, format: .number.precision(.fractionLength(2))) · fit \(fitted, format: .number.precision(.fractionLength(2)))")
+            .font(.caption)
+            .padding(4)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    /// Shared axis furniture: ~6 ticks with gridlines and adaptive
+    /// precision (integers stay bare, fractions get up to 3 places).
+    /// A named helper (not inline closures) to keep the Chart
+    /// type-check tractable — Charts DSL + big closures exhaust it.
+    private var axisContent: some AxisContent {
+        AxisMarks(values: .automatic(desiredCount: 6)) { _ in
+            AxisGridLine()
+            AxisTick()
+            AxisValueLabel(format: FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...3)))
         }
     }
 

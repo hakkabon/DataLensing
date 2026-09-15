@@ -52,6 +52,7 @@ struct ContentView: View {
         VStack(spacing: 12) {
             HStack {
                 Button("Open CSV…") { showingImporter = true }
+                Button("Open Sample") { openSample() }
                 if case .fitting = phase {
                     Button("Cancel") { cancelWork() }
                     ProgressView().controlSize(.small)
@@ -178,8 +179,17 @@ struct ContentView: View {
         phase = fallback.map(Phase.ready) ?? .idle
     }
 
-    private func open(_ url: URL) {
-        work?.cancel()
+    /// The bundled sine sample (same file the CLI spikes on): instant
+    /// first-run content with a known-good chart.
+    private func openSample() {
+        guard let url = Bundle.main.url(forResource: "sine", withExtension: "csv") else {
+            phase = .failed("Bundled sample sine.csv is missing from the app")
+            return
+        }
+        open(url)
+    }
+
+    private func open(_ url: URL) {        work?.cancel()
         let name = url.lastPathComponent
         visibleDomain = nil  // stale windows must never decimate new data
         selectedX = nil

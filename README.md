@@ -40,7 +40,7 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 32 tests (see below)
+swift test                         # 39 tests (see below)
 swift run data-lensing-app         # CLI spike on the bundled sample
 ```
 
@@ -89,7 +89,11 @@ tuning-side fit cost — an upstream estimator-policy decision.
 `0.1.0` DataTables checkpoint · `0.2.0` sample→fit→chart spike ·
 `0.3.0` Xcode viewer · `0.4.0` windowed refit policy + budgets ·
 `0.5.0` upstream fast grids (Swift-DataLens `0.6.3`) · `0.6.0`
-decimation + streaming proof · `0.7.0` scroll-aware chart + coverage.
+decimation + streaming proof · `0.7.0` scroll-aware chart + coverage ·
+`0.8.0` README + CI · `0.9.0` windowed subset refits · `0.9.1`
+signing/CI fixes · `0.10.0` column pickers · `0.10.1` responsive
+cancel · `0.11.0` click-to-inspect · `0.12.0` shallow tuning
+(Swift-DataLens `0.6.4`).
 
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).
