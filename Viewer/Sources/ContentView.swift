@@ -43,13 +43,16 @@ struct ContentView: View {
     @State private var visibleDomain: ClosedRange<Double>?
     @State private var selectedX: String?
     @State private var selectedY: String?
+    @State private var gate = GenerationGate()
+    /// Chart to restore on cancel: nil for fresh opens (→ idle).
+    @State private var fallback: BuiltChart?
 
     var body: some View {
         VStack(spacing: 12) {
             HStack {
                 Button("Open CSV…") { showingImporter = true }
                 if case .fitting = phase {
-                    Button("Cancel") { work?.cancel() }
+                    Button("Cancel") { cancelWork() }
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
@@ -152,12 +155,24 @@ struct ContentView: View {
         return "\(hullText) · \(viewText) · cached fit"
     }
 
+    /// Cancel with instant feedback: the spinner vanishes now, not when
+    /// the runaway child finishes. The generation bump also disarms the
+    /// stale completion (see GenerationGate).
+    private func cancelWork() {
+        work?.cancel()
+        work = nil
+        gate.invalidate()
+        phase = fallback.map(Phase.ready) ?? .idle
+    }
+
     private func open(_ url: URL) {
         work?.cancel()
         let name = url.lastPathComponent
         visibleDomain = nil  // stale windows must never decimate new data
         selectedX = nil
         selectedY = nil
+        fallback = nil  // fresh open cancels back to idle
+        let generation = gate.next()
         phase = .fitting(name)
         work = Task {
             do {
@@ -169,12 +184,15 @@ struct ContentView: View {
                     group.cancelAll()
                     return first
                 }
+                guard gate.isCurrent(generation) else { return }
                 selectedX = built.controller.xName
                 selectedY = built.controller.yName
                 phase = .ready(built)
             } catch is CancellationError {
+                guard gate.isCurrent(generation) else { return }
                 phase = .idle
             } catch {
+                guard gate.isCurrent(generation) else { return }
                 phase = .failed(String(describing: error))
             }
         }
@@ -188,6 +206,8 @@ struct ContentView: View {
               x != built.controller.xName || y != built.controller.yName
         else { return }
         work?.cancel()
+        fallback = built  // cancel restores this chart
+        let generation = gate.next()
         phase = .fitting("refit \(x) vs \(y)")
         work = Task {
             do {
@@ -199,11 +219,14 @@ struct ContentView: View {
                     group.cancelAll()
                     return first
                 }
+                guard gate.isCurrent(generation) else { return }
                 visibleDomain = nil
                 phase = .ready(rebuilt)
             } catch is CancellationError {
+                guard gate.isCurrent(generation) else { return }
                 phase = .ready(built)
             } catch {
+                guard gate.isCurrent(generation) else { return }
                 phase = .failed(String(describing: error))
             }
         }
@@ -213,6 +236,8 @@ struct ContentView: View {
     /// keep the old chart on cancel or when the window turns out covered.
     private func refitToView(_ built: BuiltChart, _ domain: ClosedRange<Double>) {
         work?.cancel()
+        fallback = built  // cancel restores this chart
+        let generation = gate.next()
         phase = .fitting("refit \(built.fileName)")
         work = Task {
             do {
@@ -230,6 +255,7 @@ struct ContentView: View {
                     group.cancelAll()
                     return first
                 }
+                guard gate.isCurrent(generation) else { return }
                 guard result.didRefit, let loaded = result.controller.loaded else {
                     phase = .ready(built)  // covered or empty: keep showing the cache
                     return
@@ -240,8 +266,10 @@ struct ContentView: View {
                     fileName: built.fileName, fileURL: built.fileURL, columns: built.columns
                 ))
             } catch is CancellationError {
+                guard gate.isCurrent(generation) else { return }
                 phase = .ready(built)
             } catch {
+                guard gate.isCurrent(generation) else { return }
                 phase = .failed(String(describing: error))
             }
         }

@@ -135,6 +135,19 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     ])
 }
 
+@Test func generationGateInvalidatesStaleCompletions() {
+    var gate = GenerationGate()
+    let first = gate.next()
+    #expect(gate.isCurrent(first))
+    let second = gate.next()
+    #expect(!gate.isCurrent(first))
+    #expect(gate.isCurrent(second))
+    gate.invalidate()  // cancel
+    #expect(!gate.isCurrent(second))
+    let third = gate.next()
+    #expect(gate.isCurrent(third))
+}
+
 @Test func chartWindowOpensOnlyForLargeSeries() {
     #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 1000) == nil)
     #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 4000) == nil)
