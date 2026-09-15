@@ -263,7 +263,9 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
 
 @Test func explicitSmootherChoiceSkipsTuningSummary() throws {
     let (trainX, trainY) = linearFixture()
-    let expectations: [(SmootherChoice, String)] = [(.loess, "Loess"), (.adaptive, "AdaptiveLoess")]
+    let expectations: [(SmootherChoice, String)] = [
+        (.loess, "Loess"), (.adaptive, "AdaptiveLoess"), (.kernel, "NadarayaWatson"),
+    ]
     for (choice, name) in expectations {
         var controller = FitController(
             trainX: trainX, trainY: trainY, xName: "x", yName: "y",

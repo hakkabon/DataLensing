@@ -38,13 +38,11 @@ public struct CoveragePolicy: Sendable, Hashable {
 /// Explicit legs take their span from the budget (`spans?.first`, else
 /// 0.5) and skip tuning competition — their `LoadedChart.summary` is
 /// nil, with the choice recorded in `smootherName` instead.
-/// `.kernel` (Nadaraya–Watson) arrives with the upstream
-/// `FittedSmoother` case that can carry it; until then it is absent
-/// rather than half-built.
 public enum SmootherChoice: String, Sendable, Hashable {
     case automatic = "Auto"
     case loess = "Loess"
     case adaptive = "Adaptive"
+    case kernel = "Kernel"
 }
 
 /// Owns one file's columns, tuning budget, smoother choice, and cached fit.
@@ -206,6 +204,15 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.adaptive(adaptive), nil, "AdaptiveLoess")
+        case .kernel:
+            let span = budget.spans?.first ?? 0.5
+            guard let kernel = NadarayaWatson.fit(
+                trainX: trainX, trainY: trainY, span: span,
+                robustIterations: budget.robustIterations, droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.nadarayaWatson(kernel), nil, "NadarayaWatson")
         }
         try Task.checkCancellation()
         guard let model = ChartModel.make(
@@ -251,6 +258,15 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.adaptive(adaptive), nil, "AdaptiveLoess")
+        case .kernel:
+            let span = budget.spans?.first ?? 0.5
+            guard let kernel = NadarayaWatson.fit(
+                trainX: trainX, trainY: trainY, span: span,
+                robustIterations: budget.robustIterations, droppingMissing: true
+            ) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.nadarayaWatson(kernel), nil, "NadarayaWatson")
         }
         try Task.checkCancellation()
         guard let model = try await ChartModel.makeConcurrently(
