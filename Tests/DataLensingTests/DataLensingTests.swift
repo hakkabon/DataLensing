@@ -133,6 +133,79 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(ChartWindow.initialVisibleLength(hull: 5.0...5.0, pointCount: 100_000) == nil)
 }
 
+@Test func refitNarrowsToWindow() throws {
+    // Linear truth, no missing: join-back is the identity on the subset.
+    let (trainX, trainY) = linearFixture(n: 60)
+    var controller = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
+    )
+    try controller.fit()
+    #expect(controller.hull == 0.0...59.0)
+    #expect(controller.keptFileIndices == Array(0..<60))
+
+    #expect(!controller.needsRefit(covering: 20.0...30.0))
+    // Covered windows are a no-op (same hull, same join-back).
+    #expect(try controller.refit(covering: 20.0...30.0) == false)
+    #expect(controller.hull == 0.0...59.0)
+
+    // Escaping windows refit with 25% hysteresis: covering 50...80 gives
+    // [42.5, 87.5] → rows 43...59 (data ends at 59).
+    #expect(try controller.refit(covering: 50.0...80.0) == true)
+    #expect(controller.hull == 43.0...59.0)
+    #expect(controller.keptFileIndices == Array(43...59))
+    #expect(!controller.needsRefit(covering: 50.0...60.0))
+    #expect(controller.needsRefit(covering: 0.0...59.0))
+
+    // Empty and degenerate windows keep the cached fit.
+    #expect(try controller.refit(covering: 100.0...200.0) == false)
+    #expect(controller.hull == 43.0...59.0)
+    #expect(try controller.refit(covering: 52.0...52.0) == false)
+    #expect(controller.hull == 43.0...59.0)
+}
+
+@Test func refitJoinBackSkipsMissing() throws {
+    // NA responses at rows 20–22; NA coordinate at row 40.
+    var lines = ["x,y"]
+    for i in 0..<60 {
+        if 20...22 ~= i {
+            lines.append("\(i),NA")
+        } else if i == 40 {
+            lines.append("NA,\(2 * i)")
+        } else {
+            lines.append("\(i),\(2 * i + 1)")
+        }
+    }
+    let url = try scratchCSV(lines.joined(separator: "\n") + "\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    var controller = try loadController(from: url, budget: .interactive)
+    try controller.fit()
+    // Full-data join-back skips all four missing rows.
+    #expect(controller.keptFileIndices == (0..<60).filter { ![20, 21, 22, 40].contains($0) })
+
+    // Escaping window [45, 80] ± 25% margin → rows 37...59, minus the
+    // NA rows inside (row 40 already drops on its NA x).
+    #expect(try controller.refit(covering: 45.0...80.0) == true)
+    #expect(controller.keptFileIndices == Array(37...39) + Array(41...59))
+    #expect(controller.hull == 37.0...59.0)
+}
+
+@Test func refitConcurrentMatchesSync() async throws {
+    let (trainX, trainY) = linearFixture(n: 60)
+    var sync = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
+    )
+    try sync.fit()
+    _ = try sync.refit(covering: 50.0...80.0)
+    var concurrent = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
+    )
+    _ = try await concurrent.fitConcurrently()
+    _ = try await concurrent.refitConcurrently(covering: 50.0...80.0)
+    #expect(concurrent.hull == sync.hull)
+    #expect(concurrent.keptFileIndices == sync.keptFileIndices)
+    #expect(concurrent.loaded?.model.mean == sync.loaded?.model.mean)
+}
+
 @Test func budgetPresetsCarryFastFlag() {
     #expect(TuningBudget.interactive.fastAdaptivePrediction)
     #expect(!TuningBudget.full.fastAdaptivePrediction)

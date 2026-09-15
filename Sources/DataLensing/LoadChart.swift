@@ -35,18 +35,27 @@ public enum ChartLoadError: Error, Sendable, Hashable, CustomStringConvertible {
 }
 
 /// A fitted file, ready to draw: the chart model, what the tuner chose,
-/// and which columns were used.
+/// which columns were used, and which subset positions survived.
+///
+/// `keptIndices` addresses the *fitted subset* (see
+/// `FitController.windowBase`); `FitController.keptFileIndices` composes
+/// both levels into file rows.
 public struct LoadedChart: Sendable {
     public let model: ChartModel
     public let summary: TuningSummary
     public let xName: String
     public let yName: String
+    public let keptIndices: [Int]
 
-    public init(model: ChartModel, summary: TuningSummary, xName: String, yName: String) {
+    public init(
+        model: ChartModel, summary: TuningSummary,
+        xName: String, yName: String, keptIndices: [Int]
+    ) {
         self.model = model
         self.summary = summary
         self.xName = xName
         self.yName = yName
+        self.keptIndices = keptIndices
     }
 }
 

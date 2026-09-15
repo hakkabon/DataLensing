@@ -45,6 +45,9 @@ public struct FitController: Sendable {
     public let yName: String
     public let budget: TuningBudget
     public private(set) var loaded: LoadedChart?
+    /// File-row index per fitted-subset position. Identity after a full
+    /// `fit()`; the surviving window after `refit(covering:)`.
+    public private(set) var windowBase: [Int]
 
     /// Fitted hull over the surviving predictors, or `nil` before the
     /// first fit.
@@ -55,6 +58,13 @@ public struct FitController: Sendable {
         return lo...hi
     }
 
+    /// File-level join-back for the cached fit: subset survivors mapped
+    /// through the window, or `nil` before the first fit.
+    public var keptFileIndices: [Int]? {
+        guard let kept = loaded?.keptIndices else { return nil }
+        return kept.map { windowBase[$0] }
+    }
+
     public init(trainX: [[Double]], trainY: [Double], xName: String, yName: String, budget: TuningBudget = .full) {
         precondition(trainX.count == trainY.count, "trainX and trainY must have equal counts")
         self.trainX = trainX
@@ -62,11 +72,90 @@ public struct FitController: Sendable {
         self.xName = xName
         self.yName = yName
         self.budget = budget
+        self.windowBase = Array(trainX.indices)
     }
 
     /// Fit synchronously (CLI / tests), spending the budget once.
     @discardableResult
     public mutating func fit() throws -> LoadedChart {
+        let loaded = try fittedChart(trainX: trainX, trainY: trainY)
+        self.loaded = loaded
+        self.windowBase = Array(trainX.indices)
+        return loaded
+    }
+
+    /// Fit with the grid evaluated concurrently (viewer path).
+    @discardableResult
+    public mutating func fitConcurrently() async throws -> LoadedChart {
+        let loaded = try await fittedChartConcurrently(trainX: trainX, trainY: trainY)
+        self.loaded = loaded
+        self.windowBase = Array(trainX.indices)
+        return loaded
+    }
+
+    /// The per-scroll question: does `visible` escape the cached fit?
+    /// `true` before the first fit (nothing cached yet).
+    public func needsRefit(
+        covering visible: ClosedRange<Double>, policy: CoveragePolicy = CoveragePolicy()
+    ) -> Bool {
+        guard let hull else { return true }
+        return policy.needsRefit(hull: hull, visible: visible)
+    }
+
+    /// Refit to a visible window: subset rows whose x falls in `visible`
+    /// expanded by the policy margin (hysteresis, so edge scrolls don't
+    /// immediately re-trigger), then spend the budget there.
+    ///
+    /// - Returns: `false` — keeping the cached fit — when the window is
+    ///   already covered, degenerate, or holds no rows.
+    @discardableResult
+    public mutating func refit(
+        covering visible: ClosedRange<Double>, policy: CoveragePolicy = CoveragePolicy()
+    ) throws -> Bool {
+        guard let subset = windowIndices(covering: visible, policy: policy) else { return false }
+        let loaded = try fittedChart(
+            trainX: subset.map { trainX[$0] }, trainY: subset.map { trainY[$0] }
+        )
+        self.loaded = loaded
+        self.windowBase = subset
+        return true
+    }
+
+    /// Concurrent twin of `refit(covering:)` (viewer path).
+    @discardableResult
+    public mutating func refitConcurrently(
+        covering visible: ClosedRange<Double>, policy: CoveragePolicy = CoveragePolicy()
+    ) async throws -> Bool {
+        guard let subset = windowIndices(covering: visible, policy: policy) else { return false }
+        let loaded = try await fittedChartConcurrently(
+            trainX: subset.map { trainX[$0] }, trainY: subset.map { trainY[$0] }
+        )
+        self.loaded = loaded
+        self.windowBase = subset
+        return true
+    }
+
+    /// Subset positions covering `visible` plus margin, or `nil` when no
+    /// refit is warranted. Rows use their first coordinate (the charted
+    /// predictor); non-finite coordinates never match a window.
+    private func windowIndices(
+        covering visible: ClosedRange<Double>, policy: CoveragePolicy
+    ) -> [Int]? {
+        guard needsRefit(covering: visible, policy: policy) else { return nil }
+        let width = visible.upperBound - visible.lowerBound
+        guard width > 0, width.isFinite else { return nil }
+        let margin = policy.marginFraction * width
+        let lo = visible.lowerBound - margin
+        let hi = visible.upperBound + margin
+        let subset = trainX.indices.filter { i in
+            guard let xv = trainX[i].first, xv.isFinite else { return false }
+            return xv >= lo && xv <= hi
+        }
+        guard !subset.isEmpty else { return nil }
+        return subset
+    }
+
+    private func fittedChart(trainX: [[Double]], trainY: [Double]) throws -> LoadedChart {
         guard let (fit, summary) = AutomaticSmoother.fit(
             trainX: trainX, trainY: trainY,
             degree: budget.degree, spans: budget.spans,
@@ -81,14 +170,12 @@ public struct FitController: Sendable {
         ) else {
             throw ChartLoadError.modelFailed
         }
-        let loaded = LoadedChart(model: model, summary: summary, xName: xName, yName: yName)
-        self.loaded = loaded
-        return loaded
+        return LoadedChart(
+            model: model, summary: summary, xName: xName, yName: yName, keptIndices: fit.keptIndices
+        )
     }
 
-    /// Fit with the grid evaluated concurrently (viewer path).
-    @discardableResult
-    public mutating func fitConcurrently() async throws -> LoadedChart {
+    private func fittedChartConcurrently(trainX: [[Double]], trainY: [Double]) async throws -> LoadedChart {
         guard let (fit, summary) = AutomaticSmoother.fit(
             trainX: trainX, trainY: trainY,
             degree: budget.degree, spans: budget.spans,
@@ -103,18 +190,9 @@ public struct FitController: Sendable {
         ) else {
             throw ChartLoadError.modelFailed
         }
-        let loaded = LoadedChart(model: model, summary: summary, xName: xName, yName: yName)
-        self.loaded = loaded
-        return loaded
-    }
-
-    /// The per-scroll question: does `visible` escape the cached fit?
-    /// `true` before the first fit (nothing cached yet).
-    public func needsRefit(
-        covering visible: ClosedRange<Double>, policy: CoveragePolicy = CoveragePolicy()
-    ) -> Bool {
-        guard let hull else { return true }
-        return policy.needsRefit(hull: hull, visible: visible)
+        return LoadedChart(
+            model: model, summary: summary, xName: xName, yName: yName, keptIndices: fit.keptIndices
+        )
     }
 }
 

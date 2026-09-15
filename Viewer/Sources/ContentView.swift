@@ -64,9 +64,16 @@ struct ContentView: View {
                     )
                 )
                 .frame(minHeight: 320)
-                Text(coverageLine(for: built))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text(coverageLine(for: built))
+                    if let domain = visibleDomain,
+                       built.controller.needsRefit(covering: domain)
+                    {
+                        Button("Refit to view") { refitToView(built, domain) }
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Text("\(built.loaded.xName) vs \(built.loaded.yName) — \(built.loaded.summary)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -138,6 +145,41 @@ struct ContentView: View {
                 phase = .ready(built)
             } catch is CancellationError {
                 phase = .idle
+            } catch {
+                phase = .failed(String(describing: error))
+            }
+        }
+    }
+
+    /// Windowed refit to the live viewport: subset, spend the budget,
+    /// keep the old chart on cancel or when the window turns out covered.
+    private func refitToView(_ built: BuiltChart, _ domain: ClosedRange<Double>) {
+        work?.cancel()
+        phase = .fitting("refit \(built.fileName)")
+        work = Task {
+            do {
+                let (controller, didRefit) = try await withThrowingTaskGroup(
+                    of: (FitController, Bool).self
+                ) { group in
+                    group.addTask {
+                        var controller = built.controller
+                        let didRefit = try await controller.refitConcurrently(covering: domain)
+                        return (controller, didRefit)
+                    }
+                    guard let first = try await group.next() else {
+                        throw CancellationError()
+                    }
+                    group.cancelAll()
+                    return first
+                }
+                guard didRefit, let loaded = controller.loaded else {
+                    phase = .ready(built)  // covered or empty: keep showing the cache
+                    return
+                }
+                visibleDomain = nil  // re-track against the new hull
+                phase = .ready(BuiltChart(controller: controller, loaded: loaded, fileName: built.fileName))
+            } catch is CancellationError {
+                phase = .ready(built)
             } catch {
                 phase = .failed(String(describing: error))
             }
