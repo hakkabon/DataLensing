@@ -1,6 +1,7 @@
 # CI: SPM build + tests everywhere the package claims to run, plus the
-# Xcode viewer where Xcode exists. Linux proves the Foundation-only
-# targets (and the canImport-gated chart view) stay portable.
+# Xcode viewer where Xcode exists (macOS run + iOS simulator compile).
+# Linux proves the Foundation-only targets (and the canImport-gated
+# chart view) stay portable.
 
 name: CI
 
@@ -27,6 +28,25 @@ jobs:
         run: >
           xcodebuild -project Viewer/DataLensingViewer.xcodeproj
           -scheme DataLensingViewer -configuration Debug build
+
+  viewer-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
+          test -n "$XCODE" || { echo "no Xcode 16 on runner"; exit 1; }
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      # Simulator compile only (no signing identity on runners): keeps
+      # the iOS destination from rotting. Running needs a device.
+      - name: Build viewer for iOS Simulator
+        run: >
+          xcodebuild -project Viewer/DataLensingViewer.xcodeproj
+          -scheme DataLensingViewer -configuration Debug
+          -destination 'generic/platform=iOS Simulator' build
+          CODE_SIGNING_ALLOWED=NO
 
   spm-linux:
     runs-on: ubuntu-latest
