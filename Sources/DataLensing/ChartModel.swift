@@ -97,6 +97,32 @@ public struct ChartModel: Sendable {
         return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
     }
 
+    /// Fitted mean at `x` by linear interpolation on the grid, or `nil`
+    /// when the grid is empty or `x` falls outside it (no extrapolation:
+    /// the inspector shows a gap, never an invention).
+    public func interpolatedMean(at x: Double) -> Double? {
+        guard gridX.count >= 2, mean.count == gridX.count,
+              x.isFinite, let lo = gridX.first, let hi = gridX.last,
+              x >= lo, x <= hi
+        else { return nil }
+        // Binary search the bracketing segment (grid is ascending).
+        var low = 0
+        var high = gridX.count - 1
+        while high - low > 1 {
+            let mid = (low + high) / 2
+            if gridX[mid] <= x {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+        let x0 = gridX[low]
+        let x1 = gridX[high]
+        guard x1 > x0 else { return mean[low] }
+        let t = (x - x0) / (x1 - x0)
+        return mean[low] * (1 - t) + mean[high] * t
+    }
+
     // MARK: - Shared core
 
     /// Validated inputs: surviving points plus the grid. `nil` for the

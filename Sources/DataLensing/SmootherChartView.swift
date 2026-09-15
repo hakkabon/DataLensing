@@ -30,12 +30,14 @@ public struct SmootherChartView: View {
     private let model: ChartModel
     @Binding private var visibleDomain: ClosedRange<Double>?
     private let visibleLength: Double?
+    @Binding private var xSelection: Double?
     @State private var plotWidth: CGFloat = 600
 
     public init(model: ChartModel) {
         self.model = model
         self._visibleDomain = .constant(nil)
         self.visibleLength = nil
+        self._xSelection = .constant(nil)
     }
 
     public init(
@@ -46,6 +48,21 @@ public struct SmootherChartView: View {
         self.model = model
         self._visibleDomain = visibleDomain
         self.visibleLength = visibleLength
+        self._xSelection = .constant(nil)
+    }
+
+    /// Inspectable chart: tap/drag selects an x, drawn as a rule with
+    /// the interpolated fitted value; the binding feeds viewer readouts.
+    public init(
+        model: ChartModel,
+        visibleDomain: Binding<ClosedRange<Double>?>,
+        visibleLength: Double? = nil,
+        xSelection: Binding<Double?>
+    ) {
+        self.model = model
+        self._visibleDomain = visibleDomain
+        self.visibleLength = visibleLength
+        self._xSelection = xSelection
     }
 
     public var body: some View {
@@ -60,6 +77,7 @@ public struct SmootherChartView: View {
             }
         }
         .chartScrollableAxes(.horizontal)
+        .chartXSelection(value: $xSelection)
         .chartOverlay { proxy in
             GeometryReader { geo in
                 Color.clear
@@ -99,6 +117,19 @@ public struct SmootherChartView: View {
                     y: .value("fit", model.mean[j])
                 )
                 .foregroundStyle(.blue)
+            }
+            if let selected = xSelection,
+               let fitted = model.interpolatedMean(at: selected)
+            {
+                RuleMark(x: .value("selected", selected))
+                    .foregroundStyle(.primary)
+                    .annotation(position: .top, alignment: .center) {
+                        Text("x \(selected, format: .number.precision(.fractionLength(2))) · fit \(fitted, format: .number.precision(.fractionLength(2)))")
+                            .font(.caption)
+                            .padding(4)
+                            .background(.thinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
             }
         }
     }

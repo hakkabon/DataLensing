@@ -43,6 +43,7 @@ struct ContentView: View {
     @State private var visibleDomain: ClosedRange<Double>?
     @State private var selectedX: String?
     @State private var selectedY: String?
+    @State private var inspectorX: Double?
     @State private var gate = GenerationGate()
     /// Chart to restore on cancel: nil for fresh opens (→ idle).
     @State private var fallback: BuiltChart?
@@ -89,9 +90,21 @@ struct ContentView: View {
                     visibleLength: ChartWindow.initialVisibleLength(
                         hull: built.controller.hull,
                         pointCount: built.loaded.model.rawX.count
-                    )
+                    ),
+                    xSelection: $inspectorX
                 )
                 .frame(minHeight: 320)
+                if let x = inspectorX,
+                   let y = built.loaded.model.interpolatedMean(at: x)
+                {
+                    Text(String(format: "x = %.3f · fitted = %.3f", x, y))
+                        .font(.caption)
+                        .monospaced()
+                } else {
+                    Text("Click the chart to inspect fitted values.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack {
                     Text(coverageLine(for: built))
                     if let domain = visibleDomain,
@@ -171,6 +184,7 @@ struct ContentView: View {
         visibleDomain = nil  // stale windows must never decimate new data
         selectedX = nil
         selectedY = nil
+        inspectorX = nil
         fallback = nil  // fresh open cancels back to idle
         let generation = gate.next()
         phase = .fitting(name)
@@ -221,6 +235,7 @@ struct ContentView: View {
                 }
                 guard gate.isCurrent(generation) else { return }
                 visibleDomain = nil
+                inspectorX = nil
                 phase = .ready(rebuilt)
             } catch is CancellationError {
                 guard gate.isCurrent(generation) else { return }
@@ -261,6 +276,7 @@ struct ContentView: View {
                     return
                 }
                 visibleDomain = nil  // re-track against the new hull
+                inspectorX = nil
                 phase = .ready(BuiltChart(
                     controller: result.controller, loaded: loaded,
                     fileName: built.fileName, fileURL: built.fileURL, columns: built.columns

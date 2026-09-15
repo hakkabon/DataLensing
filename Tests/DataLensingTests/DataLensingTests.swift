@@ -135,6 +135,31 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     ])
 }
 
+@Test func interpolatedMeanIsExactOnGridAndLinearBetween() throws {
+    let (trainX, trainY) = linearFixture(n: 25)
+    guard let (fit, _) = AutomaticSmoother.fit(
+        trainX: trainX, trainY: trainY, spans: [0.5], robustIterations: 0, droppingMissing: true
+    ) else {
+        Issue.record("fit returned nil")
+        return
+    }
+    guard let model = ChartModel.make(trainX: trainX, trainY: trainY, fit: fit, gridCount: 25) else {
+        Issue.record("model build returned nil")
+        return
+    }
+    // On grid points the interpolation is the value itself.
+    for (gx, gm) in zip(model.gridX, model.mean) {
+        #expect(model.interpolatedMean(at: gx) == gm)
+    }
+    // Between points it is the linear blend (checked against hand math).
+    let x = (model.gridX[7] + model.gridX[8]) / 2
+    #expect(model.interpolatedMean(at: x) == (model.mean[7] + model.mean[8]) / 2)
+    // Outside the hull: a gap, not an invention.
+    #expect(model.interpolatedMean(at: model.gridX.first! - 1) == nil)
+    #expect(model.interpolatedMean(at: model.gridX.last! + 1) == nil)
+    #expect(model.interpolatedMean(at: .nan) == nil)
+}
+
 @Test func generationGateInvalidatesStaleCompletions() {
     var gate = GenerationGate()
     let first = gate.next()
