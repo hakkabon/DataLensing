@@ -125,6 +125,14 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(sync.upper == concurrent.upper)
 }
 
+@Test func chartWindowOpensOnlyForLargeSeries() {
+    #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 1000) == nil)
+    #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 4000) == nil)
+    #expect(ChartWindow.initialVisibleLength(hull: 0.0...10.0, pointCount: 4001) == 2.0)
+    #expect(ChartWindow.initialVisibleLength(hull: nil, pointCount: 100_000) == nil)
+    #expect(ChartWindow.initialVisibleLength(hull: 5.0...5.0, pointCount: 100_000) == nil)
+}
+
 @Test func budgetPresetsCarryFastFlag() {
     #expect(TuningBudget.interactive.fastAdaptivePrediction)
     #expect(!TuningBudget.full.fastAdaptivePrediction)

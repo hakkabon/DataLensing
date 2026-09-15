@@ -33,6 +33,7 @@ struct ContentView: View {
     @State private var phase = Phase.idle
     @State private var showingImporter = false
     @State private var work: Task<Void, Never>?
+    @State private var visibleDomain: ClosedRange<Double>?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -54,8 +55,18 @@ struct ContentView: View {
                 ProgressView("Fitting \(name)…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .ready(let built):
-                SmootherChartView(model: built.loaded.model)
-                    .frame(minHeight: 320)
+                SmootherChartView(
+                    model: built.loaded.model,
+                    visibleDomain: $visibleDomain,
+                    visibleLength: ChartWindow.initialVisibleLength(
+                        hull: built.controller.hull,
+                        pointCount: built.loaded.model.rawX.count
+                    )
+                )
+                .frame(minHeight: 320)
+                Text(coverageLine(for: built))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text("\(built.loaded.xName) vs \(built.loaded.yName) — \(built.loaded.summary)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -91,9 +102,28 @@ struct ContentView: View {
         }
     }
 
+    /// Live windowed-policy readout: what the chart reports visible,
+    /// whether the cached fit still covers it.
+    private func coverageLine(for built: BuiltChart) -> String {
+        let hullText = built.controller.hull.map {
+            String(format: "hull %.2f–%.2f", $0.lowerBound, $0.upperBound)
+        } ?? "no hull"
+        guard let domain = visibleDomain else {
+            return "\(hullText) · full view · cached fit"
+        }
+        let viewText = String(
+            format: "viewing %.2f–%.2f", domain.lowerBound, domain.upperBound
+        )
+        if built.controller.needsRefit(covering: domain) {
+            return "\(hullText) · \(viewText) · OUTSIDE fitted hull — cached fit shown"
+        }
+        return "\(hullText) · \(viewText) · cached fit"
+    }
+
     private func open(_ url: URL) {
         work?.cancel()
         let name = url.lastPathComponent
+        visibleDomain = nil  // stale windows must never decimate new data
         phase = .fitting(name)
         work = Task {
             do {
