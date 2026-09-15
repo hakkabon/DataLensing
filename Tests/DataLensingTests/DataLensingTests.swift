@@ -130,6 +130,49 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(!TuningBudget.full.fastAdaptivePrediction)
 }
 
+@Test func decimationBoundsCountAndKeepsEnvelope() {
+    // Dense sine: 10k points into 300 buckets.
+    let n = 10_000
+    let xs = (0..<n).map { Double($0) / Double(n) * 10 }
+    let ys = xs.map { sin($0) + 0.5 * sin(3.7 * $0) }
+    let decimated = Decimation.decimate(x: xs, y: ys, buckets: 300)
+    #expect(decimated.x.count <= 600)
+    #expect(decimated.x.count > 300)  // most buckets hold two extremes
+    // Ordered by x.
+    #expect(zip(decimated.x, decimated.x.dropFirst()).allSatisfy { $0 <= $1 })
+    // Global extremes survive (they are some bucket's extremes).
+    #expect(decimated.y.contains(ys.min()!))
+    #expect(decimated.y.contains(ys.max()!))
+    // Per-bucket extremes survive: recompute independently and check membership.
+    let lo = xs.min()!
+    let width = xs.max()! - lo
+    for b in [0, 7, 150, 299] {
+        let inBucket = zip(xs, ys).filter {
+            var bb = Int(($0.0 - lo) / width * 300)
+            if bb >= 300 { bb = 299 }
+            return bb == b
+        }.map(\.1)
+        guard let bMin = inBucket.min(), let bMax = inBucket.max() else { continue }
+        #expect(decimated.y.contains(bMin))
+        #expect(decimated.y.contains(bMax))
+    }
+}
+
+@Test func decimationRespectsVisibleWindowAndEdges() {
+    let xs = [0.0, 1.0, 2.0, 3.0, 4.0]
+    let ys = [0.0, 10.0, 0.0, 10.0, 0.0]
+    let windowed = Decimation.decimate(x: xs, y: ys, visible: 1.0...3.0, buckets: 10)
+    #expect(windowed.x.allSatisfy { (1.0...3.0).contains($0) })
+    #expect(windowed.y.contains(10.0))
+    #expect(Decimation.decimate(x: xs, y: ys, visible: 20.0...30.0, buckets: 10).x.isEmpty)
+    #expect(Decimation.decimate(x: [], y: [], buckets: 10).x.isEmpty)
+    // Unsorted input and vertical stacks are data, not traps.
+    let unsorted = Decimation.decimate(x: [3.0, 1.0, 2.0], y: [0.0, 5.0, -5.0], buckets: 2)
+    #expect(unsorted.y.contains(5.0) && unsorted.y.contains(-5.0))
+    let stacked = Decimation.decimate(x: [1.0, 1.0, 1.0], y: [2.0, 9.0, 5.0], buckets: 4)
+    #expect(stacked.y.contains(2.0) && stacked.y.contains(9.0))
+}
+
 @Test func fastAdaptiveModelAgreesWithExact() throws {
     let (trainX, trainY) = linearFixture()
     guard let adaptive = AdaptiveLoess.fit(trainX: trainX, trainY: trainY, degree: 2, robustIterations: 1) else {

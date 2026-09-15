@@ -15,6 +15,11 @@ import SwiftUI
 /// The scrolling-view contract this spikes: the view only ever reads
 /// `model` (built once per fit). Scrolling re-renders cached arrays —
 /// it must never trigger a refit (see the windowed refit policy).
+///
+/// The points layer is min-max decimated to one bucket per pixel of
+/// view width (`Decimation`); the fitted curve always renders at full
+/// grid resolution. Below ~2 points per pixel decimation is a no-op,
+/// so small datasets render exactly.
 public struct SmootherChartView: View {
     private let model: ChartModel
 
@@ -23,32 +28,36 @@ public struct SmootherChartView: View {
     }
 
     public var body: some View {
-        Chart {
-            ForEach(model.rawX.indices, id: \.self) { i in
-                PointMark(
-                    x: .value("x", model.rawX[i]),
-                    y: .value("y", model.rawY[i])
-                )
-                .foregroundStyle(.secondary)
-                .opacity(0.5)
+        GeometryReader { proxy in
+            let buckets = max(1, Int(proxy.size.width))
+            let points = Decimation.decimate(x: model.rawX, y: model.rawY, buckets: buckets)
+            Chart {
+                ForEach(points.x.indices, id: \.self) { i in
+                    PointMark(
+                        x: .value("x", points.x[i]),
+                        y: .value("y", points.y[i])
+                    )
+                    .foregroundStyle(.secondary)
+                    .opacity(0.5)
+                }
+                ForEach(model.gridX.indices, id: \.self) { j in
+                    AreaMark(
+                        x: .value("x", model.gridX[j]),
+                        yStart: .value("lower", model.lower[j]),
+                        yEnd: .value("upper", model.upper[j])
+                    )
+                    .foregroundStyle(.blue.opacity(0.15))
+                }
+                ForEach(model.gridX.indices, id: \.self) { j in
+                    LineMark(
+                        x: .value("x", model.gridX[j]),
+                        y: .value("fit", model.mean[j])
+                    )
+                    .foregroundStyle(.blue)
+                }
             }
-            ForEach(model.gridX.indices, id: \.self) { j in
-                AreaMark(
-                    x: .value("x", model.gridX[j]),
-                    yStart: .value("lower", model.lower[j]),
-                    yEnd: .value("upper", model.upper[j])
-                )
-                .foregroundStyle(.blue.opacity(0.15))
-            }
-            ForEach(model.gridX.indices, id: \.self) { j in
-                LineMark(
-                    x: .value("x", model.gridX[j]),
-                    y: .value("fit", model.mean[j])
-                )
-                .foregroundStyle(.blue)
-            }
+            .chartScrollableAxes(.horizontal)
         }
-        .chartScrollableAxes(.horizontal)
     }
 }
 #endif

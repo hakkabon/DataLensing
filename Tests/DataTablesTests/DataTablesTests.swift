@@ -209,3 +209,59 @@ private func expectMatrix(_ actual: [[Double]]?, _ expected: [[Double]], sourceL
     #expect(table.numericMatrix(columns: ["x", "nope"]) == nil)  // unknown name
     #expect(table.numericMatrix(columnIndices: [0, 9]) == nil)  // out of range
 }
+
+@Test func streamsLargeFileWithoutWholeStringLoad() throws {
+    // 100k rows written incrementally (never one big String on either
+    // side), then streamed back: the large-dataset contract.
+    let n = 100_000
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("datatables-\(UUID().uuidString)-large.csv")
+    defer { try? FileManager.default.removeItem(at: url) }
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    func append(_ s: String) throws {
+        try handle.write(contentsOf: Data(s.utf8))
+    }
+    try append("x,y\n")
+    var batch = ""
+    batch.reserveCapacity(256 * 1024)
+    for i in 0..<n {
+        let x = Double(i) * 0.001
+        let y = sin(x) + 0.01 * sin(13.0 * x)
+        if i % 97 == 0 {
+            batch += "\(x),NA\n"
+        } else if i % 131 == 0 {
+            batch += "NA,\(y)\n"
+        } else {
+            batch += "\(x),\(y)\n"
+        }
+        if i % 5000 == 4999 {
+            try append(batch)
+            batch = ""
+        }
+    }
+    try append(batch)
+
+    let table = try CSVTable.load(contentsOf: url)
+    #expect(table.columnNames == ["x", "y"])
+    #expect(table.rowCount == n)
+    #expect(table.inferredTypes == [.double, .double])
+    guard let xs = table.doubles(forColumn: "x"),
+          let ys = table.doubles(forColumn: "y")
+    else {
+        Issue.record("numeric extraction returned nil")
+        return
+    }
+    // Missing markers land exactly where the generator put them
+    // (97-rule drops y, 131-rule drops x; i=0 hits the 97-rule).
+    #expect(!xs[0].isNaN && ys[0].isNaN)
+    #expect(!xs[97].isNaN && ys[97].isNaN)
+    #expect(xs[131].isNaN && ys[131].isFinite)
+    let expectedY = sin(1.0) + 0.01 * sin(13.0)
+    #expect(abs(xs[1000] - 1.0) <= 1e-12)
+    #expect(abs(ys[1000] - expectedY) <= 1e-12)
+    // Row-major matrix has the full shape DataLens eats.
+    let matrix = table.numericMatrix(columns: ["x", "y"])
+    #expect(matrix?.count == n)
+}
