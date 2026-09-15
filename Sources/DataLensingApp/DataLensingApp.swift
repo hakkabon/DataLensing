@@ -28,13 +28,19 @@ import Darwin
 import Glibc
 #endif
 
+/// Stderr without the C `stderr` global, which is shared mutable state
+/// under Swift 6 on Linux (it fails the build there).
+private func eprint(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
 @main
 struct DataLensingApp {
     static func main() {
         do {
             try run()
         } catch {
-            fputs("data-lensing-app: \(error)\n", stderr)
+            eprint("data-lensing-app: \(error)")
             exit(1)
         }
     }
@@ -43,7 +49,7 @@ struct DataLensingApp {
         guard let url = Bundle.module.url(
             forResource: "sine", withExtension: "csv", subdirectory: "SampleData"
         ) else {
-            fputs("data-lensing-app: bundled SampleData/sine.csv not found\n", stderr)
+            eprint("data-lensing-app: bundled SampleData/sine.csv not found")
             exit(1)
         }
         // The viewer-equivalent path: interactive budget, fast adaptive
