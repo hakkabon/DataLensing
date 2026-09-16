@@ -41,14 +41,16 @@ public struct CoveragePolicy: Sendable, Hashable {
 /// (`spans?.first`, else 0.5); the kernel GCV-selects over its own
 /// narrow grid (Loess-scale spans oversmooth kernels — span 0.5 averages
 /// half the data under every window, flattening peaks); Whittaker reads
-/// `smoothingPenalty` (GCV grid when nil). Kernel and Whittaker ignore
-/// `degree`/`robustIterations` (no polynomials there).
+/// `smoothingPenalty` (GCV grid when nil); total variation reads the
+/// same field on its own λ scale (GCV grid when nil). Kernel, Whittaker,
+/// and TV ignore `degree`/`robustIterations` (no polynomials there).
 public enum SmootherChoice: String, Sendable, Hashable {
     case automatic = "Auto"
     case loess = "Loess"
     case adaptive = "Adaptive"
     case kernel = "Kernel"
     case whittaker = "Whittaker"
+    case totalVariation = "Total Variation"
 }
 
 /// Owns one file's columns, tuning budget, smoother choice, and cached fit.
@@ -184,10 +186,13 @@ public struct FitController: Sendable {
     /// to bracket the optimum, not resolve it).
     static let defaultSmoothingPenalties: [Double] = [0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6]
 
+    /// TV-scale GCV grid (fused-lasso penalties live near the response
+    /// scale, not the Whittaker scale — separate grid, same policy).
+    static let defaultTVPenalties: [Double] = [0.01, 0.05, 0.1, 0.5, 1, 5]
+
     /// Kernel-scale GCV grid: local-constant fits need narrow windows
     /// (proven by `selectSpanPrefersSmallSpansOnCurves` upstream).
     static let defaultKernelSpans: [Double] = [0.05, 0.1, 0.2, 0.4]
-
     /// Whittaker fit honoring the budget: explicit penalty, else GCV
     /// over the default grid (order 2 — the Hodrick–Prescott form).
     private func whittakerFit(trainX: [[Double]], trainY: [Double]) -> WhittakerEilers? {
@@ -198,6 +203,20 @@ public struct FitController: Sendable {
         }
         return WhittakerEilers.selectLambda(
             trainX: trainX, trainY: trainY, lambdas: Self.defaultSmoothingPenalties,
+            droppingMissing: true
+        )?.fit
+    }
+
+    /// Total-variation fit honoring the budget: explicit penalty (shared
+    /// `smoothingPenalty` field, TV λ scale), else GCV over the TV grid.
+    private func totalVariationFit(trainX: [[Double]], trainY: [Double]) -> TotalVariation? {
+        if let penalty = budget.smoothingPenalty {
+            return TotalVariation.fit(
+                trainX: trainX, trainY: trainY, lambda: penalty, droppingMissing: true
+            )
+        }
+        return TotalVariation.selectLambda(
+            trainX: trainX, trainY: trainY, lambdas: Self.defaultTVPenalties,
             droppingMissing: true
         )?.fit
     }
@@ -246,6 +265,11 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.whittakerEilers(penalized), nil, "WhittakerEilers")
+        case .totalVariation:
+            guard let segments = totalVariationFit(trainX: trainX, trainY: trainY) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.totalVariation(segments), nil, "TotalVariation")
         }
         try Task.checkCancellation()
         guard let model = ChartModel.make(
@@ -304,6 +328,11 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.whittakerEilers(penalized), nil, "WhittakerEilers")
+        case .totalVariation:
+            guard let segments = totalVariationFit(trainX: trainX, trainY: trainY) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.totalVariation(segments), nil, "TotalVariation")
         }
         try Task.checkCancellation()
         guard let model = try await ChartModel.makeConcurrently(

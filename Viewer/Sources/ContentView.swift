@@ -91,7 +91,7 @@ struct ContentView: View {
                         ForEach(
                             [
                                 SmootherChoice.automatic, .loess, .adaptive, .kernel,
-                                .whittaker,
+                                .whittaker, .totalVariation,
                             ],
                             id: \.self
                         ) { choice in

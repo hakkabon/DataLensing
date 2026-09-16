@@ -289,7 +289,7 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let (trainX, trainY) = linearFixture()
     let expectations: [(SmootherChoice, String)] = [
         (.loess, "Loess"), (.adaptive, "AdaptiveLoess"), (.kernel, "NadarayaWatson"),
-        (.whittaker, "WhittakerEilers"),
+        (.whittaker, "WhittakerEilers"), (.totalVariation, "TotalVariation"),
     ]
     for (choice, name) in expectations {
         var controller = FitController(
