@@ -111,7 +111,8 @@ struct ContentView: View {
                         hull: built.controller.hull,
                         pointCount: built.loaded.model.rawX.count
                     ),
-                    xSelection: $inspectorX
+                    xSelection: $inspectorX,
+                    xIsDate: built.columns.first(where: { $0.name == built.controller.xName })?.isDate ?? false
                 )
                 .frame(minHeight: 320)
                 if let x = inspectorX,

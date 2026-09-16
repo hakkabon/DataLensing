@@ -126,12 +126,13 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
 }
 
 @Test func inspectColumnsReportsNamesAndNumeric() throws {
-    let url = try scratchCSV("time,height,label\n0,1.0,a\n1,3.0,b\n")
+    let url = try scratchCSV("time,height,label,day\n0,1.0,a,2024-01-01\n1,3.0,b,2024-01-02\n")
     defer { try? FileManager.default.removeItem(at: url) }
     #expect(try inspectColumns(from: url) == [
         ColumnInfo(name: "time", isNumeric: true),
         ColumnInfo(name: "height", isNumeric: true),
         ColumnInfo(name: "label", isNumeric: false),
+        ColumnInfo(name: "day", isNumeric: true, isDate: true),
     ])
 }
 

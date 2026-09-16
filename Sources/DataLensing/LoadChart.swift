@@ -71,23 +71,29 @@ public struct LoadedChart: Sendable {
 public struct ColumnInfo: Sendable, Hashable {
     /// Header name (or `column_<i>` without a header).
     public let name: String
-    /// Whether the column extracts to `[Double]` (integer or double).
+    /// Whether the column extracts to `[Double]` (integer, double, or
+    /// date-as-epoch-seconds).
     public let isNumeric: Bool
+    /// Whether those doubles are UTC epoch seconds (date axis formatting).
+    public let isDate: Bool
 
-    public init(name: String, isNumeric: Bool) {
+    public init(name: String, isNumeric: Bool, isDate: Bool = false) {
         self.name = name
         self.isNumeric = isNumeric
+        self.isDate = isDate
     }
 }
 
-/// List a file's columns (names + numeric flags) without fitting: the
-/// cheap half behind column pickers. A second parse happens at fit
+/// List a file's columns (names + numeric/date flags) without fitting:
+/// the cheap half behind column pickers. A second parse happens at fit
 /// time (`loadController`); parse is milliseconds against seconds of
 /// fit, so sharing one table isn't worth the retained memory.
 public func inspectColumns(from url: URL) throws -> [ColumnInfo] {
     let table = try CSVTable.load(contentsOf: url)
     try Task.checkCancellation()
-    return table.columns.map { ColumnInfo(name: $0.name, isNumeric: $0.doubles != nil) }
+    return table.columns.map {
+        ColumnInfo(name: $0.name, isNumeric: $0.doubles != nil, isDate: $0.inferredType == .date)
+    }
 }
 
 /// Load a CSV file, fit its two numeric columns, and build the chart.

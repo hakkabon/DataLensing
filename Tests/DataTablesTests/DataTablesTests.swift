@@ -140,7 +140,7 @@ private func expectMatrix(_ actual: [[Double]]?, _ expected: [[Double]], sourceL
 }
 
 @Test func chunkSizeNeverChangesResults() throws {
-    let content = "name,x,y,note\n\"a,1\",1,1.5,\"héllo 🌍\"\nb,NA,2.5,\"multi\nline\"\nc,3,,\"q\"\"q\"\n"
+    let content = "name,x,y,note,day\n\"a,1\",1,1.5,\"héllo 🌍\",2024-01-01\nb,NA,2.5,\"multi\nline\",2024-01-15T03:04:05+02:00\nc,3,,\"q\"\"q\",2024-02-29\n"
     let sizes = [1, 2, 7, 64 * 1024]
     let reference = try CSVTable.parse(content)
     for size in sizes {
@@ -196,6 +196,43 @@ private func expectMatrix(_ actual: [[Double]]?, _ expected: [[Double]], sourceL
     #expect(throws: (any Error).self) {
         try CSVTable.load(contentsOf: url)
     }
+}
+
+@Test func dateInferenceAndEpochs() throws {
+    let table = try CSVTable.parse(
+        "day,moment,offset,frac\n" +
+        "2024-01-15,2024-01-15T03:04:05Z,2024-01-15T05:04:05+02:00,1970-01-01T00:00:00.5Z\n" +
+        "2024-02-29,2000-01-01T00:00:00Z,2000-01-01T00:00:00Z,1970-01-01T00:00:00Z\n"
+    )
+    #expect(table.inferredTypes == [.date, .date, .date, .date])
+    // Anchors: day precision, leap day, Z/offset equivalence, fractions.
+    expectDoubles(table.doubles(forColumn: "day"), [1705276800, 1709164800])
+    expectDoubles(table.doubles(forColumn: "moment"), [1705287845, 946684800])
+    expectDoubles(table.doubles(forColumn: "offset"), [1705287845, 946684800])
+    expectDoubles(table.doubles(forColumn: "frac"), [0.5, 0])
+}
+
+@Test func invalidDatesStayString() throws {
+    // Non-padded, out-of-range, impossible, wrong separator, prose.
+    let table = try CSVTable.parse(
+        "v\n2024-13-01\n2024-02-30\n2024-1-5\n15/01/2024\ntomorrow\n2024-01-01 12:00:00\n"
+    )
+    #expect(table.inferredTypes == [.string])
+    #expect(table.doubles(forColumn: "v") == nil)
+}
+
+@Test func mixedNumericAndDateIsString() throws {
+    let table = try CSVTable.parse("v\n1\n2024-01-01\n")
+    #expect(table.inferredTypes == [.string])
+    let flipped = try CSVTable.parse("v\n2024-01-01\n1\n")
+    #expect(flipped.inferredTypes == [.string])
+}
+
+@Test func missingMarkersInDateColumns() throws {
+    let table = try CSVTable.parse("d,y\n2024-01-01,1\nNA,2\n,3\n")
+    #expect(table.inferredTypes == [.date, .integer])
+    expectDoubles(table.doubles(forColumn: "d"), [1704067200, .nan, .nan])
+    expectMatrix(table.numericMatrix(columns: ["d", "y"]), [[1704067200, 1], [.nan, 2], [.nan, 3]])
 }
 
 @Test func numericMatrixShapeAndNilCases() throws {

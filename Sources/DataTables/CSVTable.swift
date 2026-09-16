@@ -8,27 +8,34 @@ import Foundation
 
 /// Per-column inferred type.
 ///
-/// Downgrades sticky downward within a column: `integer` → `double` →
-/// `string`. A column with only missing values infers as `double`
-/// (all `.nan`), so it stays fittable downstream.
+/// Numeric inference downgrades sticky downward: `integer` → `double`.
+/// Dates form a parallel track: a column is `.date` exactly when every
+/// present value parses as a date and none parses as numeric — any mix
+/// of text, numbers, and dates is `.string`. A column with only missing
+/// values infers as `.double` (all `.nan`), so it stays fittable
+/// downstream.
 public enum ColumnType: Sendable, Hashable {
     /// Every present value parses as `Int`.
     case integer
     /// Every present value parses as `Double` (but some fail `Int`).
     case double
-    /// At least one present value parses as neither.
+    /// Every present value parses as a date (but none as numeric).
+    case date
+    /// Anything else (text, or a mix of the above).
     case string
 }
 
-/// One parsed column: numeric columns carry `doubles`, string columns
-/// carry `strings`, never both.
+/// One parsed column: numeric and date columns carry `doubles`, string
+/// columns carry `strings`, never both.
 public struct CSVColumn: Sendable {
     /// Column name from the header, or `column_<i>` when `hasHeader` is false.
     public let name: String
     /// Type inferred from the present values.
     public let inferredType: ColumnType
-    /// One entry per row; missing values are `.nan`.
-    /// Non-`nil` exactly when `inferredType` is `.integer` or `.double`.
+    /// One entry per row; missing values are `.nan`. Date columns carry
+    /// UTC epoch seconds here (fittable as-is; format via `isDate`).
+    /// Non-`nil` exactly when `inferredType` is `.integer`, `.double`,
+    /// or `.date`.
     public let doubles: [Double]?
     /// One entry per row; missing values are `nil`, quoted fields verbatim.
     /// Non-`nil` exactly when `inferredType` is `.string`.
@@ -189,6 +196,9 @@ public struct CSVTable: Sendable {
         }
         var raws = [[String?]](repeating: [], count: width)
         var kinds = [ColumnType](repeating: .integer, count: width)
+        // Tracks "no numeric value seen yet" per column: a date votes
+        // `.date` only on a numerics-free column; any mix falls to `.string`.
+        var sawNumeric = [Bool](repeating: false, count: width)
 
         func ingest(_ record: [String], line: Int) throws {
             guard record.count == width else {
@@ -203,9 +213,15 @@ public struct CSVTable: Sendable {
                 if kinds[i] == .string {
                     continue
                 } else if Int(text) != nil {
+                    if kinds[i] == .date { kinds[i] = .string; continue }
+                    sawNumeric[i] = true
                     continue  // still integer-or-better
                 } else if Double(text) != nil {
+                    if kinds[i] == .date { kinds[i] = .string; continue }
+                    sawNumeric[i] = true
                     kinds[i] = .double
+                } else if CSVDate.epochSeconds(text) != nil, !sawNumeric[i] {
+                    kinds[i] = .date
                 } else {
                     kinds[i] = .string
                 }
@@ -234,6 +250,12 @@ public struct CSVTable: Sendable {
                     return Double(cell) ?? .nan
                 }
                 built.append(CSVColumn(name: names[i], inferredType: kinds[i], doubles: values, strings: nil))
+            case .date:
+                let values = raws[i].map { cell -> Double in
+                    guard let cell, let epoch = CSVDate.epochSeconds(cell) else { return .nan }
+                    return epoch
+                }
+                built.append(CSVColumn(name: names[i], inferredType: .date, doubles: values, strings: nil))
             case .string:
                 built.append(CSVColumn(name: names[i], inferredType: .string, doubles: nil, strings: raws[i]))
             }

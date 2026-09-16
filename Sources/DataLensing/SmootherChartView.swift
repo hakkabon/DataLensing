@@ -8,6 +8,7 @@
 
 #if canImport(SwiftUI) && canImport(Charts)
 import Charts
+import Foundation
 import SwiftUI
 
 /// Raw points + fitted mean + uncertainty band for one smoother.
@@ -31,6 +32,7 @@ public struct SmootherChartView: View {
     @Binding private var visibleDomain: ClosedRange<Double>?
     private let visibleLength: Double?
     @Binding private var xSelection: Double?
+    private let xIsDate: Bool
     @State private var plotWidth: CGFloat = 600
 
     public init(model: ChartModel) {
@@ -38,6 +40,7 @@ public struct SmootherChartView: View {
         self._visibleDomain = .constant(nil)
         self.visibleLength = nil
         self._xSelection = .constant(nil)
+        self.xIsDate = false
     }
 
     public init(
@@ -49,20 +52,25 @@ public struct SmootherChartView: View {
         self._visibleDomain = visibleDomain
         self.visibleLength = visibleLength
         self._xSelection = .constant(nil)
+        self.xIsDate = false
     }
 
     /// Inspectable chart: tap/drag selects an x, drawn as a rule with
     /// the interpolated fitted value; the binding feeds viewer readouts.
+    /// With `xIsDate`, x ticks render as UTC dates (day precision past
+    /// two days of span, minute precision below).
     public init(
         model: ChartModel,
         visibleDomain: Binding<ClosedRange<Double>?>,
         visibleLength: Double? = nil,
-        xSelection: Binding<Double?>
+        xSelection: Binding<Double?>,
+        xIsDate: Bool = false
     ) {
         self.model = model
         self._visibleDomain = visibleDomain
         self.visibleLength = visibleLength
         self._xSelection = xSelection
+        self.xIsDate = xIsDate
     }
 
     public var body: some View {
@@ -128,7 +136,15 @@ public struct SmootherChartView: View {
                     }
             }
         }
-        .chartXAxis { axisContent }
+        .chartXAxis {
+            if xIsDate,
+               let lo = model.rawX.min(), let hi = model.rawX.max(), hi > lo
+            {
+                dateAxisContent(range: lo...hi)
+            } else {
+                axisContent
+            }
+        }
         .chartYAxis { axisContent }
     }
 
@@ -150,6 +166,29 @@ public struct SmootherChartView: View {
             AxisTick()
             AxisValueLabel(format: FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...3)))
         }
+    }
+
+    /// Date axis furniture for epoch-second x values: UTC labels, day
+    /// precision past two days of data span, minute precision below.
+    /// A per-call formatter (never shared) keeps this Sendable-clean.
+    @AxisContentBuilder
+    private func dateAxisContent(range: ClosedRange<Double>) -> some AxisContent {
+        let dayPrecision = range.upperBound - range.lowerBound > 2 * 86400
+        AxisMarks(values: .automatic(desiredCount: 6)) { value in
+            AxisGridLine()
+            AxisTick()
+            if let epoch = value.as(Double.self) {
+                AxisValueLabel(Self.dateLabel(epoch, dayPrecision: dayPrecision))
+            }
+        }
+    }
+
+    private static func dateLabel(_ epoch: Double, dayPrecision: Bool) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = dayPrecision ? "yyyy-MM-dd" : "yyyy-MM-dd HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: epoch))
     }
 
     /// Equatable snapshot of the live viewport for `onChange` tracking:

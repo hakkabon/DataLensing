@@ -6,22 +6,27 @@ through raw points + fitted curve + uncertainty band in Swift Charts.
 
 The library (`DataLens`) owns the statistics. This repo owns everything
 around it: streaming data-in, the windowed refit policy, the tuning
-budget, point decimation, and the viewer app. The engine↔app contract is
-one call — `AutomaticSmoother.fit(...) → (FittedSmoother, TuningSummary)`
-— with `predict` / `standardErrors` evaluated on cached fits, never
-refit per frame.
+budget, explicit smoother choice, point decimation, and the viewer app.
+The engine↔app contract is one call — `AutomaticSmoother.fit(...) →
+(FittedSmoother, TuningSummary)` — with `predict` / `standardErrors`
+evaluated on cached fits, never refit per frame. Explicit legs (Loess,
+Adaptive, Kernel, Whittaker, Total Variation) skip the competition via
+`SmootherChoice`; the tuner never routes kernel/penalized/edge-preserving
+fits (pinned upstream by test).
 
 ## Layout
 
 ```
 Package.swift                  # DataTables + DataLensing + CLI; pins Swift-DataLens by revision
 Sources/DataTables/            # Local data-in: streaming CSV, type inference, [[Double]] extraction
-Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, decimation, chart view
-Sources/DataLensingApp/        # CLI spike: bundled sine.csv → fit → terminal report (dogfoods loadChart)
-Sources/DataLensingApp/SampleData/sine.csv  # 1000 deterministic rows, ~2% missing
-Tests/DataTablesTests/         # Parser, inference, errors, 100k-row streaming proof
-Tests/DataLensingTests/        # Contract, policy, budgets, decimation, loader
-Viewer/                        # Xcode macOS app hosting SmootherChartView (file picker, scroll, coverage)
+Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, smoother
+                               # choice, decimation, generation gate, chart view + window policy
+Sources/DataLensingApp/        # CLI: bundled samples → fit → terminal report (dogfoods loadChart)
+Sources/DataLensingApp/SampleData/  # sine.csv, steps.csv, outliers.csv (deterministic, documented below)
+Tests/DataTablesTests/         # Parser, inference, errors, chunk-size independence, 100k streaming
+Tests/DataLensingTests/        # Contract, policy, budgets, refits, decimation, choices, loader, gates
+Viewer/                        # Xcode macOS + iPad app: file/sample/column/smoother pickers,
+                               # scroll + coverage + refit-to-view, click-to-inspect
 ```
 
 `DataTables` lives in-repo (one consumer) as Foundation-only portable
@@ -40,15 +45,16 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 39 tests (see below)
-swift run data-lensing-app         # CLI spike on the bundled sample
+swift test                         # 42 tests (see below)
+swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
 ```bash
-# Viewer app (macOS)
+# Viewer app (macOS + iPad)
 xcodebuild -project Viewer/DataLensingViewer.xcodeproj \
   -scheme DataLensingViewer -configuration Debug build
-# …or open the project in Xcode and press Run, then "Open CSV…".
+# …or open the project in Xcode and press Run, then "Open CSV…" or Samples.
+# iPad runs from Xcode with team signing; iPhone builds but is best-effort.
 ```
 
 Sample data regenerates deterministically (`random.Random(42)`); see the
@@ -80,23 +86,25 @@ viewer, which discovers them live — adding a CSV needs no code change):
   helpers): `DataTablesTests` (quoting, delimiters, inference, errors,
   chunk-size independence, file≡string, 100k streaming) and
   `DataLensingTests` (CSV→fit→join-back, loader policy, windowed
-  coverage, budgets, decimation, concurrent parity).
+  coverage + refits, budgets incl. shallow/fast flags, decimation,
+  concurrent parity, explicit choices, column inspect, gates,
+  interpolation).
 - **Docs live with the change**: public API is documented; update this
   file in the same commit as the feature.
 
 ## Performance notes (measured, not assumed)
 
 On 1000 sine rows: parse ≈ 0.01s; full auto-tune ≈ 38s release
-(≈ 210s debug); light fit ≈ 13s release; 200-pt grid + SEs ≈ 16s
-release exact, ≈ 0.5s borrowed-bandwidth. Debug numerics run ~10–25×
-slow — use the **Release** scheme for real files.
+(≈ 210s debug); shallow-Loess interactive ≈ 5s; adaptive interactive +
+fast grids ≈ 13s; Whittaker interactive ≈ 0.3s; TV interactive ≈ 0.8s.
+Debug numerics run ~10–25× slow — use the **Release** scheme for real
+files.
 
-The levers, in order: `TuningBudget` (`.full` vs `.interactive`),
-`FitController` (scroll evaluates the cached fit; refit only outside
-hull × margin), concurrent grid evaluation, borrowed-bandwidth
-adaptive paths (opt-in via the budget, agreement inside half the noise
-scale), min-max point decimation per pixel. The remaining wall is
-tuning-side fit cost — an upstream estimator-policy decision.
+The levers, in order: `TuningBudget` (`.full` vs `.interactive`,
+shallow/fast flags, per-leg penalty grids), `FitController` (scroll
+evaluates the cached fit; refit only outside hull × margin; windowed
+subset refits), concurrent grid evaluation, explicit smoother choice
+(auto-tune vs direct legs), min-max point decimation per pixel.
 
 ## Versions
 
@@ -107,7 +115,11 @@ decimation + streaming proof · `0.7.0` scroll-aware chart + coverage ·
 `0.8.0` README + CI · `0.9.0` windowed subset refits · `0.9.1`
 signing/CI fixes · `0.10.0` column pickers · `0.10.1` responsive
 cancel · `0.11.0` click-to-inspect · `0.12.0` shallow tuning
-(Swift-DataLens `0.6.4`).
+(Swift-DataLens `0.6.4`) · `0.13.0` sample button + axes ·
+`0.14.0` explicit smoother choice (Swift-DataLens `0.7.x`) ·
+`0.15.0` iPad destination · `0.16.x` CI arch fixes · `0.17.0`
+Whittaker picker (Swift-DataLens `0.8.0`) · `0.17.1` tag hygiene ·
+`0.18.0` TV picker (Swift-DataLens `0.9.0`).
 
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).
