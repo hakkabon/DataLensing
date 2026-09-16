@@ -37,12 +37,16 @@ public struct CoveragePolicy: Sendable, Hashable {
 ///
 /// Explicit legs take their span from the budget (`spans?.first`, else
 /// 0.5) and skip tuning competition — their `LoadedChart.summary` is
-/// nil, with the choice recorded in `smootherName` instead.
+/// nil, with the choice recorded in `smootherName` instead. The kernel
+/// and Whittaker legs ignore `degree`/`robustIterations` (no polynomials
+/// or reweighting there); Whittaker reads `smoothingPenalty` (GCV grid
+/// when nil).
 public enum SmootherChoice: String, Sendable, Hashable {
     case automatic = "Auto"
     case loess = "Loess"
     case adaptive = "Adaptive"
     case kernel = "Kernel"
+    case whittaker = "Whittaker"
 }
 
 /// Owns one file's columns, tuning budget, smoother choice, and cached fit.
@@ -173,6 +177,25 @@ public struct FitController: Sendable {
         return subset
     }
 
+    /// Default GCV grid for a nil `smoothingPenalty`: log-spaced across
+    /// the penalty scales real data spans (GCV picks; the grid only has
+    /// to bracket the optimum, not resolve it).
+    static let defaultSmoothingPenalties: [Double] = [0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6]
+
+    /// Whittaker fit honoring the budget: explicit penalty, else GCV
+    /// over the default grid (order 2 — the Hodrick–Prescott form).
+    private func whittakerFit(trainX: [[Double]], trainY: [Double]) -> WhittakerEilers? {
+        if let penalty = budget.smoothingPenalty {
+            return WhittakerEilers.fit(
+                trainX: trainX, trainY: trainY, lambda: penalty, droppingMissing: true
+            )
+        }
+        return WhittakerEilers.selectLambda(
+            trainX: trainX, trainY: trainY, lambdas: Self.defaultSmoothingPenalties,
+            droppingMissing: true
+        )?.fit
+    }
+
     private func fittedChart(trainX: [[Double]], trainY: [Double]) throws -> LoadedChart {
         let (fit, summary, name): (FittedSmoother, TuningSummary?, String)
         switch smoother {
@@ -213,6 +236,11 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.nadarayaWatson(kernel), nil, "NadarayaWatson")
+        case .whittaker:
+            guard let penalized = whittakerFit(trainX: trainX, trainY: trainY) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.whittakerEilers(penalized), nil, "WhittakerEilers")
         }
         try Task.checkCancellation()
         guard let model = ChartModel.make(
@@ -267,6 +295,11 @@ public struct FitController: Sendable {
                 throw ChartLoadError.fitFailed
             }
             (fit, summary, name) = (.nadarayaWatson(kernel), nil, "NadarayaWatson")
+        case .whittaker:
+            guard let penalized = whittakerFit(trainX: trainX, trainY: trainY) else {
+                throw ChartLoadError.fitFailed
+            }
+            (fit, summary, name) = (.whittakerEilers(penalized), nil, "WhittakerEilers")
         }
         try Task.checkCancellation()
         guard let model = try await ChartModel.makeConcurrently(

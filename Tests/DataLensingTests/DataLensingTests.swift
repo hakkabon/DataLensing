@@ -265,6 +265,7 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let (trainX, trainY) = linearFixture()
     let expectations: [(SmootherChoice, String)] = [
         (.loess, "Loess"), (.adaptive, "AdaptiveLoess"), (.kernel, "NadarayaWatson"),
+        (.whittaker, "WhittakerEilers"),
     ]
     for (choice, name) in expectations {
         var controller = FitController(
@@ -282,6 +283,20 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         trainX: trainX, trainY: trainY, xName: "x", yName: "y", budget: .interactive
     )
     #expect(try auto.fit().summary != nil)
+}
+
+@Test func whittakerExplicitPenaltySkipsSelection() throws {
+    // An explicit penalty fits directly (no GCV grid spent).
+    let (trainX, trainY) = linearFixture()
+    var budget = TuningBudget.interactive
+    budget.smoothingPenalty = 100
+    var controller = FitController(
+        trainX: trainX, trainY: trainY, xName: "x", yName: "y",
+        budget: budget, smoother: .whittaker
+    )
+    let loaded = try controller.fit()
+    #expect(loaded.smootherName == "WhittakerEilers")
+    #expect(loaded.model.mean.allSatisfy { $0.isFinite })
 }
 
 @Test func interactiveBudgetSkipsAdaptiveContender() throws {

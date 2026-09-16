@@ -83,7 +83,10 @@ struct ContentView: View {
                     }
                     Picker("Smoother", selection: $selectedSmoother) {
                         ForEach(
-                            [SmootherChoice.automatic, .loess, .adaptive, .kernel],
+                            [
+                                SmootherChoice.automatic, .loess, .adaptive, .kernel,
+                                .whittaker,
+                            ],
                             id: \.self
                         ) { choice in
                             Text(choice.rawValue).tag(choice)
