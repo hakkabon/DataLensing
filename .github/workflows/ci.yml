@@ -41,11 +41,18 @@ jobs:
           xcodebuild -version
       # Simulator compile only (no signing identity on runners): keeps
       # the iOS destination from rotting. Running needs a device.
+      # ARCHS=arm64: the generic destination builds universal binaries,
+      # but upstream's Rust FFI xcframework ships no x86_64-simulator
+      # slice — the x86_64 link fails on missing _ffi_/_uniffi_ symbols.
+      # Our Swift is arch-independent, so arm64-only still proves iOS
+      # compile coverage. (Upstream could close this by adding the
+      # ios-x86_64-simulator slice; same reason Intel Macs can't link
+      # simulator builds locally.)
       - name: Build viewer for iOS Simulator
         run: >
           xcodebuild -project Viewer/DataLensingViewer.xcodeproj
           -scheme DataLensingViewer -configuration Debug
-          -destination 'generic/platform=iOS Simulator' build
+          -destination 'generic/platform=iOS Simulator' ARCHS=arm64 build
           CODE_SIGNING_ALLOWED=NO
 
   spm-linux:
