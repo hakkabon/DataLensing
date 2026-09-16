@@ -261,6 +261,30 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(TuningBudget.full.adaptiveContender)
 }
 
+@Test func kernelChoiceTracksSineApex() throws {
+    // Reported flattening: a Loess-scale span (0.5) averages half the
+    // data under every kernel window, drawing a straight line under the
+    // peak. GCV-selected narrow spans must reach near it.
+    let n = 60
+    let xs = (0..<n).map { [10.0 * Double($0) / Double(n - 1)] }
+    let ys = xs.map { sin($0[0]) }
+    var controller = FitController(
+        trainX: xs, trainY: ys, xName: "x", yName: "y",
+        budget: .interactive, smoother: .kernel
+    )
+    let loaded = try controller.fit()
+    #expect(loaded.smootherName == "NadarayaWatson")
+    let apex = zip(loaded.model.gridX, loaded.model.mean).filter {
+        abs($0.0 - Double.pi / 2) < 0.5
+    }.map(\.1)
+    #expect(!apex.isEmpty)
+    #expect(apex.max()! > 0.8)
+    let rmse = sqrt(zip(loaded.model.gridX, loaded.model.mean).reduce(0.0) { acc, pair in
+        acc + pow(pair.1 - sin(pair.0), 2)
+    } / Double(loaded.model.mean.count))
+    #expect(rmse < 0.2)
+}
+
 @Test func explicitSmootherChoiceSkipsTuningSummary() throws {
     let (trainX, trainY) = linearFixture()
     let expectations: [(SmootherChoice, String)] = [

@@ -10,14 +10,14 @@
 		100000000000000000000040 /* ViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000020 /* ViewerApp.swift */; };
 		100000000000000000000041 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000021 /* ContentView.swift */; };
 		100000000000000000000042 /* DataLensing in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000071 /* DataLensing */; };
-		100000000000000000000082 /* sine.csv in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000083 /* sine.csv */; };
+		100000000000000000000082 /* SampleData in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000083 /* SampleData */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		100000000000000000000020 /* ViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerApp.swift; sourceTree = "<group>"; };
 		100000000000000000000021 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		100000000000000000000022 /* DataLensingViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DataLensingViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		100000000000000000000083 /* sine.csv */ = {isa = PBXFileReference; lastKnownFileType = text; path = "../Sources/DataLensingApp/SampleData/sine.csv"; sourceTree = SOURCE_ROOT; };
+		100000000000000000000083 /* SampleData */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SampleData; path = "../Sources/DataLensingApp/SampleData"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */

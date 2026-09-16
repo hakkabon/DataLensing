@@ -54,6 +54,20 @@ xcodebuild -project Viewer/DataLensingViewer.xcodeproj \
 Sample data regenerates deterministically (`random.Random(42)`); see the
 header in `Sources/DataLensingApp/DataLensingApp.swift`.
 
+## Samples
+
+`Sources/DataLensingApp/SampleData/` (bundled in both the CLI and the
+viewer, which discovers them live — adding a CSV needs no code change):
+
+- `sine.csv` — 1000 rows of sin(x) + N(0, 0.15) on x ∈ [0, 10], ~2%
+  missing. The smooth periodic reference (`Random(42)`).
+- `steps.csv` — 600 rows of piecewise-constant levels (0 / 2 / 1) +
+  N(0, 0.12), ~1% missing. Step-response demo: kernel and Whittaker
+  legs behave very differently here (`Random(7)`).
+- `outliers.csv` — 400 rows of 2x + 1 + N(0, 0.2) with ~6% heavy
+  outliers (±3–6) and sparse missing. Robustness demo
+  (`Random(7)`, continued stream).
+
 ## Conventions
 
 - **Value semantics**: models are `struct`s conforming to `Sendable`.

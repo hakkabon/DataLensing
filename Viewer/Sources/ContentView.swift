@@ -53,7 +53,13 @@ struct ContentView: View {
         VStack(spacing: 12) {
             HStack {
                 Button("Open CSV…") { showingImporter = true }
-                Button("Open Sample") { openSample() }
+                Menu("Samples") {
+                    ForEach(sampleURLs, id: \.self) { url in
+                        Button(url.deletingPathExtension().lastPathComponent) {
+                            open(url)
+                        }
+                    }
+                }
                 if case .fitting = phase {
                     Button("Cancel") { cancelWork() }
                     ProgressView().controlSize(.small)
@@ -198,14 +204,16 @@ struct ContentView: View {
         phase = fallback.map(Phase.ready) ?? .idle
     }
 
-    /// The bundled sine sample (same file the CLI spikes on): instant
-    /// first-run content with a known-good chart.
-    private func openSample() {
-        guard let url = Bundle.main.url(forResource: "sine", withExtension: "csv") else {
-            phase = .failed("Bundled sample sine.csv is missing from the app")
-            return
-        }
-        open(url)
+    /// Bundled samples, discovered live (adding a CSV to SampleData
+    /// needs no code change — the folder reference copies it in).
+    private var sampleURLs: [URL] {
+        guard let dir = Bundle.main.url(forResource: "SampleData", withExtension: nil),
+              let urls = try? FileManager.default.contentsOfDirectory(
+                  at: dir, includingPropertiesForKeys: nil
+              )
+        else { return [] }
+        return urls.filter { $0.pathExtension.lowercased() == "csv" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     private func open(_ url: URL) {        work?.cancel()
