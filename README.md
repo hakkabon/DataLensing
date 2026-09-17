@@ -45,7 +45,7 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 42 tests (see below)
+swift test                         # 56 tests (see below)
 swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
@@ -92,6 +92,26 @@ viewer, which discovers them live — adding a CSV needs no code change):
 - **Docs live with the change**: public API is documented; update this
   file in the same commit as the feature.
 
+## UI Interactions (viewer app)
+
+| Shortcut | Action |
+|----------|--------|
+| `⌘O` | Open CSV file picker |
+| `⌘W` | Clear chart (back to idle) |
+| `⌘E` | Export fitted grid to clipboard (tab-separated: x, fit, lower, upper) |
+| `←` / `→` | Step the probe cursor one grid point left / right (with smooth animation) |
+| `Escape` | Dismiss probe cursor |
+| Click / drag | Set probe to clicked x position |
+
+The **Descriptive Statistics** sidebar section (below Model Information) shows
+n, mean, std, median, min, max for the X and Y columns of the surviving data
+(post-missing-drop). The **Copy Fitted Grid** button in that section copies
+the same tab-separated grid that `⌘E` does.
+
+Chart colours track the system accent colour (System Preferences → General
+→ Accent Colour) so the fitted curve and uncertainty band stay visually
+consistent with the rest of the macOS UI.
+
 ## Performance notes (measured, not assumed)
 
 On 1000 sine rows: parse ≈ 0.01s; full auto-tune ≈ 38s release
@@ -122,7 +142,10 @@ cancel · `0.11.0` click-to-inspect · `0.12.0` shallow tuning
 `0.15.0` iPad destination · `0.16.x` CI arch fixes · `0.17.0`
 Whittaker picker (Swift-DataLens `0.8.0`) · `0.17.1` tag hygiene ·
 `0.18.0` TV picker (Swift-DataLens `0.9.0`) · `0.19.0` planar rendering
-layers + confidence interval probe inspection + memoized decimation.
+layers + confidence interval probe inspection + memoized decimation ·
+`0.20.0` descriptive statistics sidebar + keyboard shortcuts (⌘O/W/E,
+arrow-key probe stepping) + export fitted grid + accent colour theming
++ polished empty / loading / error states.
 
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).

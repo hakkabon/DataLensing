@@ -5,6 +5,11 @@
 // scrollable. Compiles only where SwiftUI/Charts exist (Apple
 // platforms); the rest of the package — DataTables, ChartModel, the
 // CLI — stays Foundation-only and portable.
+//
+// The chart marks (curve line, uncertainty hull) use the system
+// accent colour so the chart respects the user's choice in System
+// Preferences. Arrow-key probe stepping is supported via
+// `steppedSelection(by:)` — see ContentView for the key handler.
 
 #if canImport(SwiftUI) && canImport(Charts)
 import Charts
@@ -41,12 +46,15 @@ public struct ChartPlanes: OptionSet, Sendable, Hashable {
 /// Rendering is organized into decoupled display planes:
 /// 1. **Gridlines Plane**: Axis gridlines and ticks (toggleable via `planes`).
 /// 2. **Samples Plane**: Min-max decimated raw training points.
-/// 3. **Hull Plane**: Shaded area mark showing the ±2 SE uncertainty band.
-/// 4. **Curve Plane**: Crisp vector line for the fitted smoothed mean.
+/// 3. **Hull Plane**: Shaded area mark showing the ±2 SE uncertainty band — drawn with the system accent colour at 18 % opacity.
+/// 4. **Curve Plane**: Crisp vector line for the fitted smoothed mean — drawn in the system accent colour.
 /// 5. **Probe Plane**: Interactive selection cursor and confidence interval readout.
 ///
 /// The points layer is min-max decimated to one bucket per pixel of
 /// plot width and memoized so scrubbing the probe does not re-decimate points.
+///
+/// Arrow-key probe stepping is supported: call `steppedSelection(by:)` from
+/// the parent to advance/rewind `xSelection` to the nearest grid neighbour.
 public struct SmootherChartView: View {
     private let model: ChartModel
     @Binding private var visibleDomain: ClosedRange<Double>?
@@ -167,7 +175,7 @@ public struct SmootherChartView: View {
                         yStart: .value("lower", model.lower[j]),
                         yEnd: .value("upper", model.upper[j])
                     )
-                    .foregroundStyle(.blue.opacity(0.15))
+                    .foregroundStyle(Color.accentColor.opacity(0.18))
                 }
             }
 
@@ -178,7 +186,7 @@ public struct SmootherChartView: View {
                         x: .value("x", model.gridX[j]),
                         y: .value("fit", model.mean[j])
                     )
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(Color.accentColor)
                     .lineStyle(StrokeStyle(lineWidth: 2))
                 }
             }
@@ -287,6 +295,33 @@ public struct SmootherChartView: View {
             return OverlayKey(minX: nil, maxX: nil, width: width)
         }
         return OverlayKey(minX: min(lo, hi), maxX: max(lo, hi), width: width)
+    }
+
+    // MARK: - Arrow-key probe stepping
+
+    /// Returns the index of the grid point nearest to `x`, or `nil`
+    /// when the grid is empty.
+    public func nearestGridIndex(for x: Double) -> Int? {
+        guard !model.gridX.isEmpty else { return nil }
+        var best = 0
+        var bestDist = abs(model.gridX[0] - x)
+        for i in 1 ..< model.gridX.count {
+            let d = abs(model.gridX[i] - x)
+            if d < bestDist { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    /// Returns the `x` value of the grid point that is `steps` positions
+    /// away from the one nearest to the current `xSelection`.
+    ///
+    /// Stepping beyond the grid boundary clamps to the first/last point.
+    /// Returns `nil` when the grid is empty.
+    public func steppedSelection(by steps: Int) -> Double? {
+        guard !model.gridX.isEmpty else { return nil }
+        let origin = xSelection.flatMap { nearestGridIndex(for: $0) } ?? 0
+        let target = max(0, min(model.gridX.count - 1, origin + steps))
+        return model.gridX[target]
     }
 }
 #endif

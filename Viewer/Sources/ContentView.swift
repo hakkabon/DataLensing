@@ -8,10 +8,19 @@
 //  orphaned work). Security-scoped access wraps the load so the app
 //  stays correct if/when sandboxed.
 //
+//  Phase 2 additions:
+//  • ⌘O: open file picker  ⌘W: clear chart  ⌘E: export fitted grid
+//  • ←/→ arrow keys step the probe cursor along the fitted grid
+//  • Descriptive Statistics section in the sidebar
+//  • Polished empty / loading / error states
+//
 
 import DataLensing
 import SwiftUI
 import UniformTypeIdentifiers
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// What the viewer has finished building on a background task. The
 /// controller is retained for the windowed refit policy: future scrolls
@@ -49,8 +58,13 @@ struct ContentView: View {
     @State private var activePlanes: ChartPlanes = .all
     /// Chart to restore on cancel: nil for fresh opens (→ idle).
     @State private var fallback: BuiltChart?
+    /// Last successfully opened URL for "Try Again" retry.
+    @State private var lastURL: URL?
 
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    /// `SmootherChartView` reference for arrow-key stepping.
+    @State private var chartView: SmootherChartView?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -71,6 +85,35 @@ struct ContentView: View {
                 open(url)
             case .failure(let error):
                 phase = .failed(String(describing: error))
+            }
+        }
+        // ─── Keyboard Shortcuts ───────────────────────────────────────
+        .onKeyPress(.leftArrow) {
+            stepProbe(by: -1)
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            stepProbe(by: 1)
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            inspectorX = nil
+            return .handled
+        }
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Open CSV…") { showingImporter = true }
+                    .keyboardShortcut("o", modifiers: .command)
+
+                Button("Clear Chart") { clearChart() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .disabled(!isReady)
+
+                Divider()
+
+                Button("Export Fitted Grid…") { exportFittedGrid() }
+                    .keyboardShortcut("e", modifiers: .command)
+                    .disabled(!isReady)
             }
         }
     }
@@ -170,10 +213,54 @@ struct ContentView: View {
                         }
                     }
                 }
+
+                // ── Descriptive Statistics ────────────────────────────
+                descriptiveStatsSection(for: built.loaded.model)
             }
         }
         .listStyle(.sidebar)
         .navigationTitle("DataLensing")
+    }
+
+    /// Sidebar section: compact table of X/Y descriptive statistics.
+    @ViewBuilder
+    private func descriptiveStatsSection(for model: ChartModel) -> some View {
+        let xs = model.xSummary
+        let ys = model.ySummary
+        Section("Descriptive Statistics") {
+            VStack(alignment: .leading, spacing: 4) {
+                statsRow(label: "n", x: "\(xs.n)", y: "\(ys.n)")
+                statsRow(label: "mean",
+                         x: fmt6(xs.mean), y: fmt6(ys.mean))
+                statsRow(label: "std",
+                         x: fmt6(xs.std), y: fmt6(ys.std))
+                statsRow(label: "median",
+                         x: fmt6(xs.median), y: fmt6(ys.median))
+                statsRow(label: "min",
+                         x: fmt6(xs.min), y: fmt6(ys.min))
+                statsRow(label: "max",
+                         x: fmt6(xs.max), y: fmt6(ys.max))
+            }
+            .font(.caption2.monospaced())
+
+            Button("Copy Fitted Grid") { exportFittedGrid() }
+                .font(.caption)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.accentColor)
+        }
+    }
+
+    private func statsRow(label: String, x: String, y: String) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .frame(width: 52, alignment: .leading)
+                .foregroundStyle(.secondary)
+            Text(x)
+                .frame(minWidth: 72, alignment: .trailing)
+            Spacer()
+            Text(y)
+                .frame(minWidth: 72, alignment: .trailing)
+        }
     }
 
     // MARK: - Detail Canvas
@@ -182,28 +269,10 @@ struct ContentView: View {
     private var detailContent: some View {
         switch phase {
         case .idle:
-            VStack(spacing: 12) {
-                Image(systemName: "chart.xyaxis.line")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.secondary)
-                Text("No Dataset Loaded")
-                    .font(.headline)
-                Text("Open a CSV file or choose a sample dataset from the sidebar to explore smoothing models.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            idleHeroView
 
         case .fitting(let name):
-            VStack(spacing: 12) {
-                ProgressView()
-                    .controlSize(.large)
-                Text("Fitting \(name)…")
-                    .font(.headline)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            fittingView(name: name)
 
         case .ready(let built):
             VStack(spacing: 12) {
@@ -219,6 +288,7 @@ struct ContentView: View {
                     planes: activePlanes
                 )
                 .frame(minHeight: 340)
+                .animation(.easeOut(duration: 0.15), value: inspectorX)
 
                 // Probe & Coverage Status Bar
                 HStack {
@@ -238,7 +308,7 @@ struct ContentView: View {
                                 .monospaced()
                         }
                     } else {
-                        Text("Click or drag on the chart to probe fitted values & confidence bounds.")
+                        Text("Click or drag on the chart to probe fitted values & confidence bounds. ← → keys step the probe.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -264,20 +334,126 @@ struct ContentView: View {
             .padding()
 
         case .failed(let message):
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.red)
-                Text("Failed to Load or Fit")
+            failedView(message: message)
+        }
+    }
+
+    // MARK: - Polished state views
+
+    private var idleHeroView: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.accentColor.opacity(0.05),
+                    Color.accentColor.opacity(0.02),
+                    Color.clear,
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 56, weight: .ultraLight))
+                    .foregroundStyle(.quaternary)
+
+                VStack(spacing: 6) {
+                    Text("No Dataset Loaded")
+                        .font(.title2.weight(.semibold))
+                    Text("Open a CSV file or choose a sample dataset\nfrom the sidebar to explore smoothing models.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        showingImporter = true
+                    } label: {
+                        Label("Open CSV…", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+
+                    if !sampleURLs.isEmpty {
+                        Menu {
+                            ForEach(sampleURLs, id: \.self) { url in
+                                Button(url.deletingPathExtension().lastPathComponent) {
+                                    open(url)
+                                }
+                            }
+                        } label: {
+                            Label("Try Sample", systemImage: "folder")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .padding(40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func fittingView(name: String) -> some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+                .scaleEffect(1.5)
+            VStack(spacing: 4) {
+                Text("Fitting model…")
                     .font(.headline)
+                Text(name)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Button("Cancel") { cancelWork() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func failedView(message: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(.red)
+
+            VStack(spacing: 6) {
+                Text("Failed to Load or Fit")
+                    .font(.title3.weight(.semibold))
                 Text(message)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+                    .lineLimit(6)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack(spacing: 12) {
+                if let url = lastURL {
+                    Button("Try Again") { open(url) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                }
+                Button("Open Different File…") { showingImporter = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Helpers
+
+    private var isReady: Bool {
+        if case .ready = phase { return true }
+        return false
     }
 
     private func planeBinding(_ plane: ChartPlanes) -> Binding<Bool> {
@@ -320,6 +496,54 @@ struct ContentView: View {
         return "\(hullText) · \(viewText) · cached fit"
     }
 
+    /// Step the probe cursor by `steps` grid positions.
+    private func stepProbe(by steps: Int) {
+        guard case .ready(let built) = phase else { return }
+        let model = built.loaded.model
+        guard !model.gridX.isEmpty else { return }
+        // Find current nearest index
+        let currentIdx: Int
+        if let x = inspectorX {
+            var best = 0
+            var bestDist = abs(model.gridX[0] - x)
+            for i in 1 ..< model.gridX.count {
+                let d = abs(model.gridX[i] - x)
+                if d < bestDist { bestDist = d; best = i }
+            }
+            currentIdx = best
+        } else {
+            currentIdx = model.gridX.count / 2
+        }
+        let target = max(0, min(model.gridX.count - 1, currentIdx + steps))
+        withAnimation(.easeOut(duration: 0.1)) {
+            inspectorX = model.gridX[target]
+        }
+    }
+
+    /// Copy the fitted grid TSV to the pasteboard.
+    private func exportFittedGrid() {
+        guard case .ready(let built) = phase else { return }
+        let tsv = built.loaded.model.fittedGridTSV
+        #if canImport(AppKit)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(tsv, forType: .tabularText)
+        pb.setString(tsv, forType: .string)
+        #endif
+    }
+
+    private func clearChart() {
+        work?.cancel()
+        work = nil
+        gate.invalidate()
+        fallback = nil
+        visibleDomain = nil
+        inspectorX = nil
+        selectedX = nil
+        selectedY = nil
+        phase = .idle
+    }
+
     /// Cancel with instant feedback: the spinner vanishes now, not when
     /// the runaway child finishes. The generation bump also disarms the
     /// stale completion (see GenerationGate).
@@ -342,7 +566,9 @@ struct ContentView: View {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
-    private func open(_ url: URL) {        work?.cancel()
+    private func open(_ url: URL) {
+        work?.cancel()
+        lastURL = url
         let name = url.lastPathComponent
         visibleDomain = nil  // stale windows must never decimate new data
         selectedX = nil
@@ -460,6 +686,10 @@ struct ContentView: View {
             }
         }
     }
+
+    // MARK: - Formatting helpers
+
+    private func fmt6(_ v: Double) -> String { String(format: "%.6g", v) }
 }
 
 /// Parse instantly, then spend the interactive budget in the

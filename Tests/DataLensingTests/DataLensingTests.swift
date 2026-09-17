@@ -469,3 +469,82 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(abs(probed!.upper - 1.5) < 1e-9)
 }
 
+// MARK: - DescriptiveStats tests
+
+/// DataSummary correctly computes n, mean, std, min, max, median, Q1, Q3
+/// for a known five-element dataset.
+@Test func dataSummaryComputesCorrectStatistics() {
+    // Dataset: 1, 2, 3, 4, 5
+    let values = [1.0, 3.0, 2.0, 5.0, 4.0]  // deliberately unsorted
+    let s = DataSummary(values: values)
+
+    #expect(s.n == 5)
+    #expect(abs(s.mean - 3.0) < 1e-9)
+    #expect(abs(s.min - 1.0) < 1e-9)
+    #expect(abs(s.max - 5.0) < 1e-9)
+    #expect(abs(s.median - 3.0) < 1e-9)
+
+    // Sample std of {1,2,3,4,5}: variance = 10/4 = 2.5, std = √2.5
+    let expectedStd = (2.5 as Double).squareRoot()
+    #expect(abs(s.std - expectedStd) < 1e-9)
+
+    // Q1: 25th percentile of sorted [1,2,3,4,5]; linear interp → 1 + 0.25*(2-1) = 1.75?
+    // pos = 0.25 * 4 = 1.0 → lo=1 hi=2 frac=0 → sorted[1] = 2.0
+    #expect(abs(s.q1 - 2.0) < 1e-9)
+    // Q3: 75th percentile; pos = 0.75 * 4 = 3.0 → sorted[3] = 4.0
+    #expect(abs(s.q3 - 4.0) < 1e-9)
+    #expect(abs(s.iqr - 2.0) < 1e-9)
+}
+
+/// An empty DataSummary returns zeros without crashing.
+@Test func dataSummaryHandlesEmptyInput() {
+    let s = DataSummary(values: [])
+    #expect(s.n == 0)
+    #expect(s.mean == 0)
+    #expect(s.std == 0)
+    #expect(s.min == 0)
+    #expect(s.max == 0)
+}
+
+/// ChartModel.xSummary and ySummary delegate to the raw arrays correctly.
+@Test func chartModelSummaryExtensionsDelegate() {
+    let rawX = [1.0, 2.0, 3.0]
+    let rawY = [10.0, 20.0, 30.0]
+    let gridX = [1.0, 2.0, 3.0]
+    let mean  = [10.0, 20.0, 30.0]
+
+    let model = ChartModel(rawX: rawX, rawY: rawY, gridX: gridX, mean: mean)
+
+    let xs = model.xSummary
+    #expect(xs.n == 3)
+    #expect(abs(xs.mean - 2.0) < 1e-9)
+    #expect(abs(xs.min - 1.0) < 1e-9)
+    #expect(abs(xs.max - 3.0) < 1e-9)
+
+    let ys = model.ySummary
+    #expect(ys.n == 3)
+    #expect(abs(ys.mean - 20.0) < 1e-9)
+    #expect(abs(ys.min - 10.0) < 1e-9)
+    #expect(abs(ys.max - 30.0) < 1e-9)
+}
+
+/// fittedGridTSV produces well-formed tab-separated lines.
+@Test func fittedGridTSVFormatIsCorrect() {
+    let model = ChartModel(
+        rawX: [1.0, 2.0], rawY: [1.0, 2.0],
+        gridX: [1.0, 1.5, 2.0], mean: [1.0, 1.5, 2.0],
+        lower: [0.8, 1.2, 1.6], upper: [1.2, 1.8, 2.4]
+    )
+    let tsv = model.fittedGridTSV
+    let lines = tsv.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+    // Header row
+    #expect(lines[0] == "x\tfit\tlower\tupper")
+    // Data rows: 3 data rows after header
+    #expect(lines.count == 4)
+    // Each data row has 3 tabs (4 columns)
+    for line in lines.dropFirst() {
+        #expect(line.filter { $0 == "\t" }.count == 3)
+    }
+}
+
