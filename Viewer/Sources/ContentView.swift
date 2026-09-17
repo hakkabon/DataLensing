@@ -50,129 +50,16 @@ struct ContentView: View {
     /// Chart to restore on cancel: nil for fresh opens (→ idle).
     @State private var fallback: BuiltChart?
 
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Button("Open CSV…") { showingImporter = true }
-                Menu("Samples") {
-                    ForEach(sampleURLs, id: \.self) { url in
-                        Button(url.deletingPathExtension().lastPathComponent) {
-                            open(url)
-                        }
-                    }
-                }
-                if case .fitting = phase {
-                    Button("Cancel") { cancelWork() }
-                    ProgressView().controlSize(.small)
-                }
-                Spacer()
-                Text(statusLine).foregroundStyle(.secondary)
-            }
-            switch phase {
-            case .idle:
-                Text("Open a CSV file with two numeric columns.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .fitting(let name):
-                ProgressView("Fitting \(name)…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .ready(let built):
-                HStack(spacing: 16) {
-                    Picker("X", selection: $selectedX) {
-                        ForEach(built.numericNames, id: \.self) { name in
-                            Text(name).tag(Optional(name))
-                        }
-                    }
-                    Picker("Y", selection: $selectedY) {
-                        ForEach(built.numericNames, id: \.self) { name in
-                            Text(name).tag(Optional(name))
-                        }
-                    }
-                    Picker("Smoother", selection: $selectedSmoother) {
-                        ForEach(
-                            [
-                                SmootherChoice.automatic, .loess, .adaptive, .kernel,
-                                .whittaker, .totalVariation,
-                            ],
-                            id: \.self
-                        ) { choice in
-                            Text(choice.rawValue).tag(choice)
-                        }
-                    }
-                    Divider().frame(height: 16)
-                    HStack(spacing: 8) {
-                        Toggle("Samples", isOn: planeBinding(.samples))
-                        Toggle("Hull", isOn: planeBinding(.hull))
-                        Toggle("Curve", isOn: planeBinding(.curve))
-                        Toggle("Grid", isOn: planeBinding(.gridlines))
-                    }
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                    Spacer()
-                }
-                .pickerStyle(.menu)
-                .onChange(of: selectedX) { _, _ in reselectIfNeeded(built) }
-                .onChange(of: selectedY) { _, _ in reselectIfNeeded(built) }
-                .onChange(of: selectedSmoother) { _, _ in reselectIfNeeded(built) }
-                SmootherChartView(
-                    model: built.loaded.model,
-                    visibleDomain: $visibleDomain,
-                    visibleLength: ChartWindow.initialVisibleLength(
-                        hull: built.controller.hull,
-                        pointCount: built.loaded.model.rawX.count
-                    ),
-                    xSelection: $inspectorX,
-                    xIsDate: built.columns.first(where: { $0.name == built.controller.xName })?.isDate ?? false,
-                    planes: activePlanes
-                )
-                .frame(minHeight: 320)
-                if let x = inspectorX,
-                   let band = built.loaded.model.interpolatedBand(at: x)
-                {
-                    if built.loaded.model.hasBand {
-                        Text(String(
-                            format: "x = %.3f · fitted = %.3f (95%% CI: [%.3f, %.3f])",
-                            x, band.mean, band.lower, band.upper
-                        ))
-                        .font(.caption)
-                        .monospaced()
-                    } else {
-                        Text(String(format: "x = %.3f · fitted = %.3f", x, band.mean))
-                            .font(.caption)
-                            .monospaced()
-                    }
-                } else {
-                    Text("Click the chart to inspect fitted values.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    Text(coverageLine(for: built))
-                    if let domain = visibleDomain,
-                       built.controller.needsRefit(covering: domain)
-                    {
-                        Button("Refit to view") { refitToView(built, domain) }
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                if let summary = built.loaded.summary {
-                    Text("\(built.loaded.xName) vs \(built.loaded.yName) — \(summary)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("\(built.loaded.xName) vs \(built.loaded.yName) — explicit \(built.loaded.smootherName), no tuning")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            case .failed(let message):
-                Text(message)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebarContent
+                .navigationSplitViewColumnWidth(min: 240, ideal: 270, max: 320)
+        } detail: {
+            detailContent
         }
-        .padding()
-        .frame(minWidth: 640, minHeight: 480)
+        .frame(minWidth: 780, minHeight: 520)
         .fileImporter(
             isPresented: $showingImporter,
             allowedContentTypes: [.commaSeparatedText],
@@ -185,6 +72,211 @@ struct ContentView: View {
             case .failure(let error):
                 phase = .failed(String(describing: error))
             }
+        }
+    }
+
+    // MARK: - Sidebar
+
+    @ViewBuilder
+    private var sidebarContent: some View {
+        List {
+            Section("Data Source") {
+                Button {
+                    showingImporter = true
+                } label: {
+                    Label("Open CSV…", systemImage: "doc.badge.plus")
+                }
+
+                Menu {
+                    ForEach(sampleURLs, id: \.self) { url in
+                        Button(url.deletingPathExtension().lastPathComponent) {
+                            open(url)
+                        }
+                    }
+                } label: {
+                    Label("Sample Datasets", systemImage: "folder")
+                }
+
+                if case .fitting = phase {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Fitting…").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel") { cancelWork() }
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            if case .ready(let built) = phase {
+                Section("Variables") {
+                    Picker("Predictor (X)", selection: $selectedX) {
+                        ForEach(built.numericNames, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
+                    Picker("Response (Y)", selection: $selectedY) {
+                        ForEach(built.numericNames, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
+                }
+                .onChange(of: selectedX) { _, _ in reselectIfNeeded(built) }
+                .onChange(of: selectedY) { _, _ in reselectIfNeeded(built) }
+
+                Section("Statistical Model") {
+                    Picker("Algorithm", selection: $selectedSmoother) {
+                        ForEach(
+                            [
+                                SmootherChoice.automatic, .loess, .adaptive, .kernel,
+                                .whittaker, .totalVariation,
+                            ],
+                            id: \.self
+                        ) { choice in
+                            Text(choice.rawValue).tag(choice)
+                        }
+                    }
+                }
+                .onChange(of: selectedSmoother) { _, _ in reselectIfNeeded(built) }
+
+                Section("Display Planes") {
+                    Toggle("Raw Samples", isOn: planeBinding(.samples))
+                    Toggle("Uncertainty Hull (±2 SE)", isOn: planeBinding(.hull))
+                    Toggle("Fitted Curve", isOn: planeBinding(.curve))
+                    Toggle("Coordinate Grid", isOn: planeBinding(.gridlines))
+                }
+
+                Section("Model Information") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("File: \(built.fileName)")
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+
+                        if let summary = built.loaded.summary {
+                            Text(summary.smoother)
+                                .font(.caption.bold())
+                            Text(summary.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text(summary.reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(built.loaded.smootherName)
+                                .font(.caption.bold())
+                            Text("Explicit fit (no tuning competition)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("DataLensing")
+    }
+
+    // MARK: - Detail Canvas
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch phase {
+        case .idle:
+            VStack(spacing: 12) {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.secondary)
+                Text("No Dataset Loaded")
+                    .font(.headline)
+                Text("Open a CSV file or choose a sample dataset from the sidebar to explore smoothing models.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .fitting(let name):
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Fitting \(name)…")
+                    .font(.headline)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .ready(let built):
+            VStack(spacing: 12) {
+                SmootherChartView(
+                    model: built.loaded.model,
+                    visibleDomain: $visibleDomain,
+                    visibleLength: ChartWindow.initialVisibleLength(
+                        hull: built.controller.hull,
+                        pointCount: built.loaded.model.rawX.count
+                    ),
+                    xSelection: $inspectorX,
+                    xIsDate: built.columns.first(where: { $0.name == built.controller.xName })?.isDate ?? false,
+                    planes: activePlanes
+                )
+                .frame(minHeight: 340)
+
+                // Probe & Coverage Status Bar
+                HStack {
+                    if let x = inspectorX,
+                       let band = built.loaded.model.interpolatedBand(at: x)
+                    {
+                        if built.loaded.model.hasBand {
+                            Text(String(
+                                format: "x = %.3f · fitted = %.3f (95%% CI: [%.3f, %.3f])",
+                                x, band.mean, band.lower, band.upper
+                            ))
+                            .font(.caption)
+                            .monospaced()
+                        } else {
+                            Text(String(format: "x = %.3f · fitted = %.3f", x, band.mean))
+                                .font(.caption)
+                                .monospaced()
+                        }
+                    } else {
+                        Text("Click or drag on the chart to probe fitted values & confidence bounds.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(coverageLine(for: built))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let domain = visibleDomain,
+                       built.controller.needsRefit(covering: domain)
+                    {
+                        Button("Refit to view") { refitToView(built, domain) }
+                            .controlSize(.small)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.bar)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .padding()
+
+        case .failed(let message):
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.red)
+                Text("Failed to Load or Fit")
+                    .font(.headline)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
