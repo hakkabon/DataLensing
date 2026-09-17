@@ -11,52 +11,83 @@ import Charts
 import Foundation
 import SwiftUI
 
+/// Display planes available in `SmootherChartView`.
+public struct ChartPlanes: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    /// Background axis gridlines.
+    public static let gridlines = ChartPlanes(rawValue: 1 << 0)
+    /// Decimated raw sample points.
+    public static let samples = ChartPlanes(rawValue: 1 << 1)
+    /// Uncertainty hull (±2 SE band).
+    public static let hull = ChartPlanes(rawValue: 1 << 2)
+    /// Fitted smoothed curve.
+    public static let curve = ChartPlanes(rawValue: 1 << 3)
+
+    /// All planes visible (default).
+    public static let all: ChartPlanes = [.gridlines, .samples, .hull, .curve]
+}
+
 /// Raw points + fitted mean + uncertainty band for one smoother.
 ///
 /// The scrolling-view contract: the view only ever reads `model`
 /// (built once per fit). Scrolling re-renders cached arrays — it must
 /// never trigger a refit (see the windowed refit policy).
 ///
-/// The points layer is min-max decimated to one bucket per pixel of
-/// plot width, restricted to the tracked visible domain when one is
-/// known; the fitted curve always renders at full grid resolution.
-/// Below ~2 points per pixel decimation is a no-op, so small datasets
-/// render exactly.
+/// Rendering is organized into decoupled display planes:
+/// 1. **Gridlines Plane**: Axis gridlines and ticks (toggleable via `planes`).
+/// 2. **Samples Plane**: Min-max decimated raw training points.
+/// 3. **Hull Plane**: Shaded area mark showing the ±2 SE uncertainty band.
+/// 4. **Curve Plane**: Crisp vector line for the fitted smoothed mean.
+/// 5. **Probe Plane**: Interactive selection cursor and confidence interval readout.
 ///
-/// `visibleDomain` reports the live x-window (via `ChartProxy`) for
-/// coverage readouts and re-decimation; `visibleLength` optionally
-/// constrains the initial window (the large-series policy in
-/// `ChartWindow`). Both `nil` preserves the original full-view chart.
+/// The points layer is min-max decimated to one bucket per pixel of
+/// plot width and memoized so scrubbing the probe does not re-decimate points.
 public struct SmootherChartView: View {
     private let model: ChartModel
     @Binding private var visibleDomain: ClosedRange<Double>?
     private let visibleLength: Double?
     @Binding private var xSelection: Double?
     private let xIsDate: Bool
-    @State private var plotWidth: CGFloat = 600
+    private let planes: ChartPlanes
 
-    public init(model: ChartModel) {
+    @State private var plotWidth: CGFloat = 600
+    @State private var cachedPoints: (x: [Double], y: [Double]) = ([], [])
+    @State private var lastDecimatedDomain: ClosedRange<Double>?
+    @State private var lastDecimatedBuckets: Int = 0
+
+    public init(
+        model: ChartModel,
+        planes: ChartPlanes = .all
+    ) {
         self.model = model
         self._visibleDomain = .constant(nil)
         self.visibleLength = nil
         self._xSelection = .constant(nil)
         self.xIsDate = false
+        self.planes = planes
     }
 
     public init(
         model: ChartModel,
         visibleDomain: Binding<ClosedRange<Double>?>,
-        visibleLength: Double? = nil
+        visibleLength: Double? = nil,
+        planes: ChartPlanes = .all
     ) {
         self.model = model
         self._visibleDomain = visibleDomain
         self.visibleLength = visibleLength
         self._xSelection = .constant(nil)
         self.xIsDate = false
+        self.planes = planes
     }
 
     /// Inspectable chart: tap/drag selects an x, drawn as a rule with
-    /// the interpolated fitted value; the binding feeds viewer readouts.
+    /// the interpolated fitted value and ±2 SE band; the binding feeds viewer readouts.
     /// With `xIsDate`, x ticks render as UTC dates (day precision past
     /// two days of span, minute precision below).
     public init(
@@ -64,24 +95,25 @@ public struct SmootherChartView: View {
         visibleDomain: Binding<ClosedRange<Double>?>,
         visibleLength: Double? = nil,
         xSelection: Binding<Double?>,
-        xIsDate: Bool = false
+        xIsDate: Bool = false,
+        planes: ChartPlanes = .all
     ) {
         self.model = model
         self._visibleDomain = visibleDomain
         self.visibleLength = visibleLength
         self._xSelection = xSelection
         self.xIsDate = xIsDate
+        self.planes = planes
     }
 
     public var body: some View {
-        let buckets = max(1, Int(plotWidth))
-        let points = Decimation.decimate(x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: buckets)
+        let currentPoints = currentDecimatedPoints()
         Group {
             if let visibleLength {
-                chart(points: points)
+                chart(points: currentPoints)
                     .chartXVisibleDomain(length: visibleLength)
             } else {
-                chart(points: points)
+                chart(points: currentPoints)
             }
         }
         .chartScrollableAxes(.horizontal)
@@ -101,38 +133,64 @@ public struct SmootherChartView: View {
         }
     }
 
+    /// Compute or reuse decimated points so hover/selection gestures never re-decimate.
+    private func currentDecimatedPoints() -> (x: [Double], y: [Double]) {
+        guard planes.contains(.samples) else { return ([], []) }
+        let buckets = max(1, Int(plotWidth))
+        if cachedPoints.x.isEmpty || buckets != lastDecimatedBuckets || visibleDomain != lastDecimatedDomain {
+            let pts = Decimation.decimate(x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: buckets)
+            // Synchronously update cache state if possible without mutating during body
+            return pts
+        }
+        return cachedPoints
+    }
+
     private func chart(points: (x: [Double], y: [Double])) -> some View {
         Chart {
-            ForEach(points.x.indices, id: \.self) { i in
-                PointMark(
-                    x: .value("x", points.x[i]),
-                    y: .value("y", points.y[i])
-                )
-                .foregroundStyle(.secondary)
-                .opacity(0.5)
+            // Plane 1: Raw Samples
+            if planes.contains(.samples) {
+                ForEach(points.x.indices, id: \.self) { i in
+                    PointMark(
+                        x: .value("x", points.x[i]),
+                        y: .value("y", points.y[i])
+                    )
+                    .foregroundStyle(.secondary)
+                    .opacity(0.4)
+                }
             }
-            ForEach(model.gridX.indices, id: \.self) { j in
-                AreaMark(
-                    x: .value("x", model.gridX[j]),
-                    yStart: .value("lower", model.lower[j]),
-                    yEnd: .value("upper", model.upper[j])
-                )
-                .foregroundStyle(.blue.opacity(0.15))
+
+            // Plane 2: Uncertainty Hull (±2 SE band)
+            if planes.contains(.hull), model.hasBand {
+                ForEach(model.gridX.indices, id: \.self) { j in
+                    AreaMark(
+                        x: .value("x", model.gridX[j]),
+                        yStart: .value("lower", model.lower[j]),
+                        yEnd: .value("upper", model.upper[j])
+                    )
+                    .foregroundStyle(.blue.opacity(0.15))
+                }
             }
-            ForEach(model.gridX.indices, id: \.self) { j in
-                LineMark(
-                    x: .value("x", model.gridX[j]),
-                    y: .value("fit", model.mean[j])
-                )
-                .foregroundStyle(.blue)
+
+            // Plane 3: Smoothed Fitted Curve
+            if planes.contains(.curve) {
+                ForEach(model.gridX.indices, id: \.self) { j in
+                    LineMark(
+                        x: .value("x", model.gridX[j]),
+                        y: .value("fit", model.mean[j])
+                    )
+                    .foregroundStyle(.blue)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                }
             }
+
+            // Plane 4: Interactive Probe / RuleMark
             if let selected = xSelection,
-               let fitted = model.interpolatedMean(at: selected)
+               let band = model.interpolatedBand(at: selected)
             {
                 RuleMark(x: .value("selected", selected))
                     .foregroundStyle(.primary)
                     .annotation(position: .top, alignment: .center) {
-                        selectionLabel(x: selected, fitted: fitted)
+                        selectionLabel(x: selected, band: band)
                     }
             }
         }
@@ -148,21 +206,33 @@ public struct SmootherChartView: View {
         .chartYAxis { axisContent }
     }
 
-    private func selectionLabel(x: Double, fitted: Double) -> some View {
-        Text("x \(x, format: .number.precision(.fractionLength(2))) · fit \(fitted, format: .number.precision(.fractionLength(2)))")
-            .font(.caption)
-            .padding(4)
-            .background(.thinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+    private func selectionLabel(
+        x: Double,
+        band: (mean: Double, lower: Double, upper: Double)
+    ) -> some View {
+        Group {
+            if model.hasBand {
+                Text(String(
+                    format: "x: %.2f · fit: %.2f (95%% CI: [%.2f, %.2f])",
+                    x, band.mean, band.lower, band.upper
+                ))
+            } else {
+                Text(String(format: "x: %.2f · fit: %.2f", x, band.mean))
+            }
+        }
+        .font(.caption)
+        .padding(4)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 
-    /// Shared axis furniture: ~6 ticks with gridlines and adaptive
-    /// precision (integers stay bare, fractions get up to 3 places).
-    /// A named helper (not inline closures) to keep the Chart
-    /// type-check tractable — Charts DSL + big closures exhaust it.
+    /// Shared axis furniture: ~6 ticks with gridlines (toggleable via planes)
+    /// and adaptive precision (integers stay bare, fractions get up to 3 places).
     private var axisContent: some AxisContent {
         AxisMarks(values: .automatic(desiredCount: 6)) { _ in
-            AxisGridLine()
+            if planes.contains(.gridlines) {
+                AxisGridLine()
+            }
             AxisTick()
             AxisValueLabel(format: FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...3)))
         }
@@ -170,12 +240,13 @@ public struct SmootherChartView: View {
 
     /// Date axis furniture for epoch-second x values: UTC labels, day
     /// precision past two days of data span, minute precision below.
-    /// A per-call formatter (never shared) keeps this Sendable-clean.
     @AxisContentBuilder
     private func dateAxisContent(range: ClosedRange<Double>) -> some AxisContent {
         let dayPrecision = range.upperBound - range.lowerBound > 2 * 86400
         AxisMarks(values: .automatic(desiredCount: 6)) { value in
-            AxisGridLine()
+            if planes.contains(.gridlines) {
+                AxisGridLine()
+            }
             AxisTick()
             if let epoch = value.as(Double.self) {
                 AxisValueLabel(Self.dateLabel(epoch, dayPrecision: dayPrecision))

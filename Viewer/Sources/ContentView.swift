@@ -46,6 +46,7 @@ struct ContentView: View {
     @State private var selectedSmoother: SmootherChoice = .automatic
     @State private var inspectorX: Double?
     @State private var gate = GenerationGate()
+    @State private var activePlanes: ChartPlanes = .all
     /// Chart to restore on cancel: nil for fresh opens (→ idle).
     @State private var fallback: BuiltChart?
 
@@ -76,7 +77,7 @@ struct ContentView: View {
                 ProgressView("Fitting \(name)…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .ready(let built):
-                HStack {
+                HStack(spacing: 16) {
                     Picker("X", selection: $selectedX) {
                         ForEach(built.numericNames, id: \.self) { name in
                             Text(name).tag(Optional(name))
@@ -98,6 +99,15 @@ struct ContentView: View {
                             Text(choice.rawValue).tag(choice)
                         }
                     }
+                    Divider().frame(height: 16)
+                    HStack(spacing: 8) {
+                        Toggle("Samples", isOn: planeBinding(.samples))
+                        Toggle("Hull", isOn: planeBinding(.hull))
+                        Toggle("Curve", isOn: planeBinding(.curve))
+                        Toggle("Grid", isOn: planeBinding(.gridlines))
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.small)
                     Spacer()
                 }
                 .pickerStyle(.menu)
@@ -112,15 +122,25 @@ struct ContentView: View {
                         pointCount: built.loaded.model.rawX.count
                     ),
                     xSelection: $inspectorX,
-                    xIsDate: built.columns.first(where: { $0.name == built.controller.xName })?.isDate ?? false
+                    xIsDate: built.columns.first(where: { $0.name == built.controller.xName })?.isDate ?? false,
+                    planes: activePlanes
                 )
                 .frame(minHeight: 320)
                 if let x = inspectorX,
-                   let y = built.loaded.model.interpolatedMean(at: x)
+                   let band = built.loaded.model.interpolatedBand(at: x)
                 {
-                    Text(String(format: "x = %.3f · fitted = %.3f", x, y))
+                    if built.loaded.model.hasBand {
+                        Text(String(
+                            format: "x = %.3f · fitted = %.3f (95%% CI: [%.3f, %.3f])",
+                            x, band.mean, band.lower, band.upper
+                        ))
                         .font(.caption)
                         .monospaced()
+                    } else {
+                        Text(String(format: "x = %.3f · fitted = %.3f", x, band.mean))
+                            .font(.caption)
+                            .monospaced()
+                    }
                 } else {
                     Text("Click the chart to inspect fitted values.")
                         .font(.caption)
@@ -166,6 +186,19 @@ struct ContentView: View {
                 phase = .failed(String(describing: error))
             }
         }
+    }
+
+    private func planeBinding(_ plane: ChartPlanes) -> Binding<Bool> {
+        Binding(
+            get: { activePlanes.contains(plane) },
+            set: { isVisible in
+                if isVisible {
+                    activePlanes.insert(plane)
+                } else {
+                    activePlanes.remove(plane)
+                }
+            }
+        )
     }
 
     private var statusLine: String {

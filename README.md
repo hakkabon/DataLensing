@@ -104,7 +104,9 @@ The levers, in order: `TuningBudget` (`.full` vs `.interactive`,
 shallow/fast flags, per-leg penalty grids), `FitController` (scroll
 evaluates the cached fit; refit only outside hull × margin; windowed
 subset refits), concurrent grid evaluation, explicit smoother choice
-(auto-tune vs direct legs), min-max point decimation per pixel.
+(auto-tune vs direct legs), min-max point decimation per pixel, and
+planar layer separation (`ChartPlanes`: gridlines, samples, hull, curve)
+with memoized decimation to ensure scrub operations never trigger re-bucketing.
 
 ## Versions
 
@@ -119,7 +121,8 @@ cancel · `0.11.0` click-to-inspect · `0.12.0` shallow tuning
 `0.14.0` explicit smoother choice (Swift-DataLens `0.7.x`) ·
 `0.15.0` iPad destination · `0.16.x` CI arch fixes · `0.17.0`
 Whittaker picker (Swift-DataLens `0.8.0`) · `0.17.1` tag hygiene ·
-`0.18.0` TV picker (Swift-DataLens `0.9.0`).
+`0.18.0` TV picker (Swift-DataLens `0.9.0`) · `0.19.0` planar rendering
+layers + confidence interval probe inspection + memoized decimation.
 
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).

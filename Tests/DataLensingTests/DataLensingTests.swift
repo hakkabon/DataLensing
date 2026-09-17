@@ -414,3 +414,58 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         try loadChart(from: numeric, xColumn: "x", yColumn: "nope")
     }
 }
+
+@Test func interpolatedBandReturnsMeanAndConfidenceInterval() {
+    let rawX = [0.0, 1.0, 2.0]
+    let rawY = [0.0, 2.0, 4.0]
+    let gridX = [0.0, 1.0, 2.0]
+    let mean = [0.0, 2.0, 4.0]
+    let lower = [-0.5, 1.5, 3.5]
+    let upper = [0.5, 2.5, 4.5]
+
+    let model = ChartModel(
+        rawX: rawX, rawY: rawY,
+        gridX: gridX, mean: mean, lower: lower, upper: upper
+    )
+    #expect(model.hasBand)
+
+    // Exact grid points
+    let band0 = model.interpolatedBand(at: 0.0)
+    #expect(band0?.mean == 0.0)
+    #expect(band0?.lower == -0.5)
+    #expect(band0?.upper == 0.5)
+
+    // Midpoint interpolation
+    let bandMid = model.interpolatedBand(at: 0.5)
+    #expect(bandMid != nil)
+    #expect(abs(bandMid!.mean - 1.0) < 1e-9)
+    #expect(abs(bandMid!.lower - 0.5) < 1e-9)
+    #expect(abs(bandMid!.upper - 1.5) < 1e-9)
+
+    // Out of bounds returns nil
+    #expect(model.interpolatedBand(at: -0.1) == nil)
+    #expect(model.interpolatedBand(at: 2.1) == nil)
+}
+
+@Test func chartModelGracefulDegradationWithoutBand() {
+    let rawX = [0.0, 1.0]
+    let rawY = [1.0, 2.0]
+    let gridX = [0.0, 0.5, 1.0]
+    let mean = [1.0, 1.5, 2.0]
+
+    let model = ChartModel(
+        rawX: rawX, rawY: rawY,
+        gridX: gridX, mean: mean
+    )
+    #expect(!model.hasBand)
+    #expect(model.lower.isEmpty)
+    #expect(model.upper.isEmpty)
+
+    // Interpolation works and returns mean for lower and upper when no band is present
+    let probed = model.interpolatedBand(at: 0.5)
+    #expect(probed != nil)
+    #expect(abs(probed!.mean - 1.5) < 1e-9)
+    #expect(abs(probed!.lower - 1.5) < 1e-9)
+    #expect(abs(probed!.upper - 1.5) < 1e-9)
+}
+

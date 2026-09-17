@@ -30,12 +30,13 @@ public struct ChartModel: Sendable {
 
     public init(
         rawX: [Double], rawY: [Double],
-        gridX: [Double], mean: [Double], lower: [Double], upper: [Double]
+        gridX: [Double], mean: [Double], lower: [Double] = [], upper: [Double] = []
     ) {
         precondition(rawX.count == rawY.count, "rawX and rawY must have equal counts")
+        precondition(gridX.count == mean.count, "gridX and mean must have equal counts")
         precondition(
-            gridX.count == mean.count && mean.count == lower.count && lower.count == upper.count,
-            "gridX, mean, lower, and upper must have equal counts"
+            lower.count == upper.count && (lower.isEmpty || lower.count == mean.count),
+            "lower and upper must have matching counts and either be empty or match mean count"
         )
         self.rawX = rawX
         self.rawY = rawY
@@ -43,6 +44,11 @@ public struct ChartModel: Sendable {
         self.mean = mean
         self.lower = lower
         self.upper = upper
+    }
+
+    /// Whether an uncertainty band (±2 SE) is available on the grid.
+    public var hasBand: Bool {
+        !lower.isEmpty && lower.count == mean.count && upper.count == mean.count
     }
 
     /// Build a chart model from parsed columns and a fit.
@@ -71,7 +77,7 @@ public struct ChartModel: Sendable {
             mean = fit.predict(prepared.grid)
             optionals = fit.standardErrors(at: prepared.grid)
         }
-        return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
+        return assemble(prepared: prepared, mean: mean, optionalsSE: optionals, gridCount: gridCount)
     }
 
     /// Concurrent twin of `make`: the grid is evaluated with the
@@ -94,13 +100,20 @@ public struct ChartModel: Sendable {
             mean = try await fit.predictConcurrently(prepared.grid)
             optionals = try await fit.standardErrorsConcurrently(at: prepared.grid)
         }
-        return assemble(prepared: prepared, mean: mean, se: optionals.compactMap { $0 }, gridCount: gridCount)
+        return assemble(prepared: prepared, mean: mean, optionalsSE: optionals, gridCount: gridCount)
     }
 
     /// Fitted mean at `x` by linear interpolation on the grid, or `nil`
     /// when the grid is empty or `x` falls outside it (no extrapolation:
     /// the inspector shows a gap, never an invention).
     public func interpolatedMean(at x: Double) -> Double? {
+        interpolatedBand(at: x)?.mean
+    }
+
+    /// Fitted mean and ±2 SE band at `x` by linear interpolation on the grid.
+    /// When standard errors are absent, `lower` and `upper` return `mean`.
+    /// Returns `nil` when `x` falls outside the grid.
+    public func interpolatedBand(at x: Double) -> (mean: Double, lower: Double, upper: Double)? {
         guard gridX.count >= 2, mean.count == gridX.count,
               x.isFinite, let lo = gridX.first, let hi = gridX.last,
               x >= lo, x <= hi
@@ -118,9 +131,15 @@ public struct ChartModel: Sendable {
         }
         let x0 = gridX[low]
         let x1 = gridX[high]
-        guard x1 > x0 else { return mean[low] }
-        let t = (x - x0) / (x1 - x0)
-        return mean[low] * (1 - t) + mean[high] * t
+        let t = (x1 > x0) ? (x - x0) / (x1 - x0) : 0.0
+        let m = mean[low] * (1 - t) + mean[high] * t
+        if hasBand {
+            let l = lower[low] * (1 - t) + lower[high] * t
+            let u = upper[low] * (1 - t) + upper[high] * t
+            return (m, l, u)
+        } else {
+            return (m, m, m)
+        }
     }
 
     // MARK: - Shared core
@@ -153,15 +172,22 @@ public struct ChartModel: Sendable {
         return Prepared(xs: xs, ys: ys, gridX: gridX, grid: gridX.map { [$0] })
     }
 
-    private static func assemble(prepared: Prepared, mean: [Double], se: [Double], gridCount: Int) -> ChartModel? {
-        // Nil SEs mean "unavailable here" (width mismatch or a
-        // non-polynomial policy refusing to extrapolate) — the band has
-        // no honest value at those points, so the build fails rather
-        // than inventing one. On the training hull with the default
-        // policy this never triggers.
-        guard mean.count == gridCount, se.count == gridCount else { return nil }
-        let lower = zip(mean, se).map { $0 - 2 * $1 }
-        let upper = zip(mean, se).map { $0 + 2 * $1 }
+    private static func assemble(
+        prepared: Prepared, mean: [Double], optionalsSE: [Double?], gridCount: Int
+    ) -> ChartModel? {
+        guard mean.count == gridCount else { return nil }
+        // If all SEs are present and finite, build full ±2 SE bands.
+        // If any SE is missing/nil (e.g. non-polynomial boundary or smoother
+        // without variance estimate), gracefully assemble without bands rather than failing.
+        let seValues = optionalsSE.compactMap { $0 }
+        let (lower, upper): ([Double], [Double])
+        if seValues.count == gridCount && seValues.allSatisfy({ $0.isFinite }) {
+            lower = zip(mean, seValues).map { $0 - 2 * $1 }
+            upper = zip(mean, seValues).map { $0 + 2 * $1 }
+        } else {
+            lower = []
+            upper = []
+        }
         return ChartModel(
             rawX: prepared.xs, rawY: prepared.ys,
             gridX: prepared.gridX, mean: mean, lower: lower, upper: upper
