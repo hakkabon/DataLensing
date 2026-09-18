@@ -164,6 +164,17 @@ scene commands + iPad clipboard, typed response scales, gradient/residual/QQ
 diagnostics, keyed 500k-point decimation cache, and two-predictor Canvas
 surfaces with trend vectors.
 
+`AnalysisReport.make(from:sourceURL:inputObservationCount:)` produces a
+schema-versioned provenance sidecar with source metadata, model/tuning choices,
+retained-row join keys, fitted values, and residuals. Reports export as stable
+JSON and observation-level CSV; non-finite diagnostics become explicit nulls
+rather than invalid JSON numbers.
+
+The scheduled `Ecosystem compatibility` workflow checks source-head builds of
+DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
+their shared solver fixture. Tagged backend releases can dispatch the same
+check immediately; the weekly run is the no-secret fallback.
+
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).
 Re-pin on each upstream tag; the pin comment records which tag the hash is.

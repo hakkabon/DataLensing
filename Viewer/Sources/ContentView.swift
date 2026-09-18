@@ -110,6 +110,7 @@ struct ContentView: View {
             open: { showingImporter = true },
             clear: clearChart,
             export: exportFittedGrid,
+            exportReport: exportAnalysisReport,
             canClear: isReady,
             canExport: isReady
         ))
@@ -238,6 +239,10 @@ struct ContentView: View {
                     .font(.caption2.monospaced())
 
                     Button("Copy Fitted Grid") { exportFittedGrid() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.accentColor)
+                    Button("Copy Analysis Report") { exportAnalysisReport() }
                         .font(.caption)
                         .buttonStyle(.borderless)
                         .foregroundStyle(Color.accentColor)
@@ -564,6 +569,26 @@ struct ContentView: View {
         pb.setString(tsv, forType: .string)
         #elseif canImport(UIKit)
         UIPasteboard.general.string = tsv
+        #endif
+    }
+
+    /// Copy a schema-versioned provenance + observation report as JSON.
+    private func exportAnalysisReport() {
+        guard case .ready(let built) = phase else { return }
+        let report = AnalysisReport.make(
+            from: built.loaded, sourceURL: built.fileURL,
+            inputObservationCount: built.controller.trainY.count,
+            sourceRows: built.controller.keptFileIndices
+        )
+        guard let data = try? report.jsonData(),
+              let json = String(data: data, encoding: .utf8) else { return }
+        #if canImport(AppKit)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(json, forType: NSPasteboard.PasteboardType("public.json"))
+        pb.setString(json, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = json
         #endif
     }
 

@@ -12,6 +12,7 @@ struct ViewerCommandActions {
     let open: () -> Void
     let clear: () -> Void
     let export: () -> Void
+    let exportReport: () -> Void
     let canClear: Bool
     let canExport: Bool
 }
@@ -43,6 +44,10 @@ private struct ViewerCommands: Commands {
 
             Button("Export Fitted Grid…") { actions?.export() }
                 .keyboardShortcut("e", modifiers: .command)
+                .disabled(actions?.canExport != true)
+
+            Button("Copy Analysis Report") { actions?.exportReport() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(actions?.canExport != true)
         }
     }

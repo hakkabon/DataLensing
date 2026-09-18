@@ -1,0 +1,52 @@
+name: Ecosystem compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+  repository_dispatch:
+    types: [datalens-release, numericcore-release]
+
+jobs:
+  source-heads:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DataLensing
+      - uses: actions/checkout@v4
+        with:
+          repository: hakkabon/Swift-DataLens
+          path: Swift-DataLens
+      - uses: actions/checkout@v4
+        with:
+          repository: hakkabon/Swift-NumericCore
+          path: Swift-NumericCore
+
+      - name: Select newest Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
+          test -n "$XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+
+      - name: Verify shared solver contract is identical
+        run: cmp Swift-DataLens/Tests/DataLensTests/Fixtures/solver-conformance.json Swift-NumericCore/Tests/NumericCoreTests/Fixtures/solver-conformance.json
+
+      - name: Test NumericCore source head
+        working-directory: Swift-NumericCore
+        # Numerical-core targets only: the AMPL language frontend is not in
+        # DataLensing's dependency path and has its own release gate.
+        run: swift test --filter NumericCoreTests
+
+      - name: Test DataLens against NumericCore source head
+        working-directory: Swift-DataLens
+        run: |
+          swift package edit Swift-NumericCore --path ../Swift-NumericCore
+          swift test
+
+      - name: Test DataLensing against both source heads
+        working-directory: DataLensing
+        run: |
+          swift package edit Swift-DataLens --path ../Swift-DataLens
+          swift package edit Swift-NumericCore --path ../Swift-NumericCore
+          swift test

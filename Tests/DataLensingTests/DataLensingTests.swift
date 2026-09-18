@@ -609,3 +609,31 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         #expect(line.filter { $0 == "\t" }.count == 3)
     }
 }
+
+@Test func analysisReportCapturesProvenanceAndExportsStableFormats() throws {
+    let url = try scratchCSV("time,value\n0,1\n1,3\n2,NA\n3,7\n")
+    let model = ChartModel(
+        rawX: [0, 1, 3], rawY: [1, 3, 7], gridX: [0, 1, 2, 3], mean: [1, 3, 5, 7],
+        fittedAtTraining: [1, 3, 7], residuals: [0, 0, .nan]
+    )
+    let loaded = LoadedChart(model: model, summary: nil, smootherName: "Loess",
+                             xName: "time", yName: "value", keptIndices: [0, 1, 3])
+    let date = Date(timeIntervalSince1970: 1_700_000_000)
+    let report = AnalysisReport.make(from: loaded, sourceURL: url,
+                                     inputObservationCount: 4, createdAt: date)
+
+    #expect(report.schemaVersion == 1)
+    #expect(report.source.fileName.hasSuffix(".csv"))
+    #expect(report.inputObservationCount == 4)
+    #expect(report.retainedObservationCount == 3)
+    #expect(report.droppedObservationCount == 1)
+    #expect(report.observations.map(\.sourceRow) == [0, 1, 3])
+    #expect(report.observations.last?.residual == nil)
+
+    let json = try #require(String(data: report.jsonData(), encoding: .utf8))
+    #expect(json.contains("\"schemaVersion\" : 1"))
+    #expect(json.contains("\"createdAt\" : \"2023-11-14T22:13:20Z\""))
+    let csv = report.observationsCSV()
+    #expect(csv.hasPrefix("source_row,time,value,fitted,residual\n"))
+    #expect(csv.split(separator: "\n").count == 4)
+}
