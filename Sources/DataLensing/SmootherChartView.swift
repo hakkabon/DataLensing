@@ -32,6 +32,12 @@ public struct ChartPlanes: OptionSet, Sendable, Hashable {
     public static let hull = ChartPlanes(rawValue: 1 << 2)
     /// Fitted smoothed curve.
     public static let curve = ChartPlanes(rawValue: 1 << 3)
+    /// First derivative in a linked lower plot.
+    public static let gradient = ChartPlanes(rawValue: 1 << 4)
+    /// Training-point residuals in a linked lower plot.
+    public static let residuals = ChartPlanes(rawValue: 1 << 5)
+    /// Normal quantile plot of residuals.
+    public static let qqPlot = ChartPlanes(rawValue: 1 << 6)
 
     /// All planes visible (default).
     public static let all: ChartPlanes = [.gridlines, .samples, .hull, .curve]
@@ -65,8 +71,16 @@ public struct SmootherChartView: View {
 
     @State private var plotWidth: CGFloat = 600
     @State private var cachedPoints: (x: [Double], y: [Double]) = ([], [])
-    @State private var lastDecimatedDomain: ClosedRange<Double>?
-    @State private var lastDecimatedBuckets: Int = 0
+    @State private var cachedKey: DecimationKey?
+
+    private struct DecimationKey: Hashable {
+        let lower: Double?
+        let upper: Double?
+        let buckets: Int
+        let count: Int
+        let firstX: Double?
+        let lastX: Double?
+    }
 
     public init(
         model: ChartModel,
@@ -115,42 +129,65 @@ public struct SmootherChartView: View {
     }
 
     public var body: some View {
-        let currentPoints = currentDecimatedPoints()
-        Group {
-            if let visibleLength {
-                chart(points: currentPoints)
-                    .chartXVisibleDomain(length: visibleLength)
-            } else {
-                chart(points: currentPoints)
+        let key = decimationKey
+        let currentPoints = currentDecimatedPoints(for: key)
+        VStack(spacing: 8) {
+            Group {
+                if let visibleLength {
+                    chart(points: currentPoints)
+                        .chartXVisibleDomain(length: visibleLength)
+                } else {
+                    chart(points: currentPoints)
+                }
             }
+            .chartScrollableAxes(.horizontal)
+            .chartXSelection(value: $xSelection)
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Color.clear
+                        .onChange(of: overlayKey(proxy: proxy, geo: geo)) { _, key in
+                            if key.width != plotWidth {
+                                plotWidth = key.width
+                            }
+                            if key.domain != visibleDomain {
+                                visibleDomain = key.domain
+                            }
+                        }
+                }
+            }
+
+            if planes.contains(.gradient) { gradientChart }
+            if planes.contains(.residuals) { residualChart }
+            if planes.contains(.qqPlot) { qqChart }
         }
-        .chartScrollableAxes(.horizontal)
-        .chartXSelection(value: $xSelection)
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                Color.clear
-                    .onChange(of: overlayKey(proxy: proxy, geo: geo)) { _, key in
-                        if key.width != plotWidth {
-                            plotWidth = key.width
-                        }
-                        if key.domain != visibleDomain {
-                            visibleDomain = key.domain
-                        }
-                    }
+        .task(id: key) {
+            guard planes.contains(.samples) else {
+                cachedPoints = ([], [])
+                cachedKey = key
+                return
             }
+            cachedPoints = Decimation.decimate(
+                x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: key.buckets
+            )
+            cachedKey = key
         }
     }
 
     /// Compute or reuse decimated points so hover/selection gestures never re-decimate.
-    private func currentDecimatedPoints() -> (x: [Double], y: [Double]) {
+    private var decimationKey: DecimationKey {
+        DecimationKey(
+            lower: visibleDomain?.lowerBound, upper: visibleDomain?.upperBound,
+            buckets: max(1, Int(plotWidth)), count: model.rawX.count,
+            firstX: model.rawX.first, lastX: model.rawX.last
+        )
+    }
+
+    private func currentDecimatedPoints(for key: DecimationKey) -> (x: [Double], y: [Double]) {
         guard planes.contains(.samples) else { return ([], []) }
-        let buckets = max(1, Int(plotWidth))
-        if cachedPoints.x.isEmpty || buckets != lastDecimatedBuckets || visibleDomain != lastDecimatedDomain {
-            let pts = Decimation.decimate(x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: buckets)
-            // Synchronously update cache state if possible without mutating during body
-            return pts
-        }
-        return cachedPoints
+        if cachedKey == key { return cachedPoints }
+        return Decimation.decimate(
+            x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: key.buckets
+        )
     }
 
     private func chart(points: (x: [Double], y: [Double])) -> some View {
@@ -212,6 +249,55 @@ public struct SmootherChartView: View {
             }
         }
         .chartYAxis { axisContent }
+        .chartYAxisLabel(model.responseScale.rawValue)
+    }
+
+    private var gradientChart: some View {
+        Chart {
+            ForEach(model.gridX.indices, id: \.self) { i in
+                if model.gradient.indices.contains(i), model.gradient[i].isFinite {
+                    LineMark(x: .value("x", model.gridX[i]),
+                             y: .value("gradient", model.gradient[i]))
+                        .foregroundStyle(.orange)
+                }
+            }
+            RuleMark(y: .value("zero", 0)).foregroundStyle(.secondary.opacity(0.5))
+        }
+        .frame(minHeight: 100, idealHeight: 130, maxHeight: 170)
+        .chartYAxisLabel("dŷ/dx")
+    }
+
+    private var residualChart: some View {
+        let step = max(1, model.rawX.count / 2_000)
+        let indices = Array(stride(from: 0, to: model.rawX.count, by: step))
+        return Chart {
+            ForEach(indices, id: \.self) { i in
+                if model.residuals.indices.contains(i), model.residuals[i].isFinite {
+                    PointMark(x: .value("x", model.rawX[i]),
+                              y: .value("residual", model.residuals[i]))
+                        .foregroundStyle(.purple.opacity(0.55))
+                }
+            }
+            RuleMark(y: .value("zero", 0)).foregroundStyle(.secondary)
+        }
+        .frame(minHeight: 100, idealHeight: 130, maxHeight: 170)
+        .chartYAxisLabel(model.residualKind.rawValue)
+    }
+
+    private var qqChart: some View {
+        let qq = model.residualQQ
+        let step = max(1, qq.observed.count / 2_000)
+        let indices = Array(stride(from: 0, to: qq.observed.count, by: step))
+        return Chart {
+            ForEach(indices, id: \.self) { i in
+                PointMark(x: .value("Normal quantile", qq.theoretical[i]),
+                          y: .value("Residual quantile", qq.observed[i]))
+                    .foregroundStyle(.teal.opacity(0.6))
+            }
+        }
+        .frame(minHeight: 100, idealHeight: 130, maxHeight: 170)
+        .chartXAxisLabel("Normal quantile")
+        .chartYAxisLabel("Residual quantile")
     }
 
     private func selectionLabel(
@@ -221,11 +307,13 @@ public struct SmootherChartView: View {
         Group {
             if model.hasBand {
                 Text(String(
-                    format: "x: %.2f · fit: %.2f (95%% CI: [%.2f, %.2f])",
-                    x, band.mean, band.lower, band.upper
+                    format: "x: %.2f · %@: %.2f (95%% CI: [%.2f, %.2f])",
+                    x, model.responseScale.rawValue.lowercased(),
+                    band.mean, band.lower, band.upper
                 ))
             } else {
-                Text(String(format: "x: %.2f · fit: %.2f", x, band.mean))
+                Text(String(format: "x: %.2f · %@: %.2f", x,
+                            model.responseScale.rawValue.lowercased(), band.mean))
             }
         }
         .font(.caption)

@@ -27,7 +27,8 @@ jobs:
       - name: Build viewer
         run: >
           xcodebuild -project Viewer/DataLensingViewer.xcodeproj
-          -scheme DataLensingViewer -configuration Debug build
+          -scheme DataLensingViewer -configuration Debug
+          -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 
   viewer-ios:
     runs-on: macos-15

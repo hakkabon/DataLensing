@@ -9,6 +9,19 @@
 import DataLens
 import Foundation
 
+/// Semantic scale of fitted values shown by the frontend.
+public enum ResponseScale: String, Sendable, Hashable {
+    case continuous = "Response"
+    case probability = "Probability"
+    case intensity = "Expected count"
+}
+
+/// Residual definition used by a chart model.
+public enum ResidualKind: String, Sendable, Hashable {
+    case raw = "Raw residual"
+    case pearson = "Pearson residual"
+}
+
 /// Everything a chart needs from a fit: the surviving raw points plus
 /// the fitted curve with an uncertainty band on a shared grid.
 ///
@@ -27,10 +40,21 @@ public struct ChartModel: Sendable {
     public let lower: [Double]
     /// Mean + 2 SE on the grid.
     public let upper: [Double]
+    /// First partial derivative on the one-dimensional evaluation grid.
+    /// Degenerate local fits are represented by `NaN` to preserve alignment.
+    public let gradient: [Double]
+    /// Fitted response at each surviving training point.
+    public let fittedAtTraining: [Double]
+    /// Diagnostic residual at each surviving training point.
+    public let residuals: [Double]
+    public let responseScale: ResponseScale
+    public let residualKind: ResidualKind
 
     public init(
         rawX: [Double], rawY: [Double],
-        gridX: [Double], mean: [Double], lower: [Double] = [], upper: [Double] = []
+        gridX: [Double], mean: [Double], lower: [Double] = [], upper: [Double] = [],
+        gradient: [Double] = [], fittedAtTraining: [Double] = [], residuals: [Double] = [],
+        responseScale: ResponseScale = .continuous, residualKind: ResidualKind = .raw
     ) {
         precondition(rawX.count == rawY.count, "rawX and rawY must have equal counts")
         precondition(gridX.count == mean.count, "gridX and mean must have equal counts")
@@ -38,12 +62,23 @@ public struct ChartModel: Sendable {
             lower.count == upper.count && (lower.isEmpty || lower.count == mean.count),
             "lower and upper must have matching counts and either be empty or match mean count"
         )
+        precondition(gradient.isEmpty || gradient.count == gridX.count,
+                     "gradient must be empty or match gridX")
+        precondition(fittedAtTraining.isEmpty || fittedAtTraining.count == rawX.count,
+                     "fittedAtTraining must be empty or match rawX")
+        precondition(residuals.isEmpty || residuals.count == rawX.count,
+                     "residuals must be empty or match rawX")
         self.rawX = rawX
         self.rawY = rawY
         self.gridX = gridX
         self.mean = mean
         self.lower = lower
         self.upper = upper
+        self.gradient = gradient
+        self.fittedAtTraining = fittedAtTraining
+        self.residuals = residuals
+        self.responseScale = responseScale
+        self.residualKind = residualKind
     }
 
     /// Whether an uncertainty band (±2 SE) is available on the grid.
@@ -77,7 +112,11 @@ public struct ChartModel: Sendable {
             mean = fit.predict(prepared.grid)
             optionals = fit.standardErrors(at: prepared.grid)
         }
-        return assemble(prepared: prepared, mean: mean, optionalsSE: optionals, gridCount: gridCount)
+        let gradients = fit.gradients(at: prepared.grid).map { $0?.first ?? .nan }
+        return assemble(
+            prepared: prepared, fit: fit, mean: mean, optionalsSE: optionals,
+            gradients: gradients, gridCount: gridCount
+        )
     }
 
     /// Concurrent twin of `make`: the grid is evaluated with the
@@ -100,7 +139,11 @@ public struct ChartModel: Sendable {
             mean = try await fit.predictConcurrently(prepared.grid)
             optionals = try await fit.standardErrorsConcurrently(at: prepared.grid)
         }
-        return assemble(prepared: prepared, mean: mean, optionalsSE: optionals, gridCount: gridCount)
+        let gradients = try await fit.gradientsConcurrently(at: prepared.grid).map { $0?.first ?? .nan }
+        return assemble(
+            prepared: prepared, fit: fit, mean: mean, optionalsSE: optionals,
+            gradients: gradients, gridCount: gridCount
+        )
     }
 
     /// Fitted mean at `x` by linear interpolation on the grid, or `nil`
@@ -173,24 +216,61 @@ public struct ChartModel: Sendable {
     }
 
     private static func assemble(
-        prepared: Prepared, mean: [Double], optionalsSE: [Double?], gridCount: Int
+        prepared: Prepared, fit: FittedSmoother, mean: [Double], optionalsSE: [Double?],
+        gradients: [Double], gridCount: Int
     ) -> ChartModel? {
-        guard mean.count == gridCount else { return nil }
+        guard mean.count == gridCount, gradients.count == gridCount,
+              fit.fittedValues.count == prepared.ys.count else { return nil }
         // If all SEs are present and finite, build full ±2 SE bands.
         // If any SE is missing/nil (e.g. non-polynomial boundary or smoother
         // without variance estimate), gracefully assemble without bands rather than failing.
+        let metadata = responseMetadata(for: fit)
         let seValues = optionalsSE.compactMap { $0 }
         let (lower, upper): ([Double], [Double])
         if seValues.count == gridCount && seValues.allSatisfy({ $0.isFinite }) {
-            lower = zip(mean, seValues).map { $0 - 2 * $1 }
-            upper = zip(mean, seValues).map { $0 + 2 * $1 }
+            lower = zip(mean, seValues).map { fitted, se in
+                let value = fitted - 2 * se
+                return metadata.scale == .continuous ? value : max(0, value)
+            }
+            upper = zip(mean, seValues).map { fitted, se in
+                let value = fitted + 2 * se
+                return metadata.scale == .probability ? min(1, value) : value
+            }
         } else {
             lower = []
             upper = []
         }
+        let residuals = zip(prepared.ys, fit.fittedValues).map { pair in
+            let (y, fitted) = pair
+            switch metadata.residualKind {
+            case .raw:
+                return y - fitted
+            case .pearson:
+                let variance: Double
+                switch metadata.scale {
+                case .probability: variance = fitted * (1 - fitted)
+                case .intensity: variance = fitted
+                case .continuous: variance = 1
+                }
+                return variance > 0 ? (y - fitted) / sqrt(variance) : .nan
+            }
+        }
         return ChartModel(
             rawX: prepared.xs, rawY: prepared.ys,
-            gridX: prepared.gridX, mean: mean, lower: lower, upper: upper
+            gridX: prepared.gridX, mean: mean, lower: lower, upper: upper,
+            gradient: gradients, fittedAtTraining: fit.fittedValues, residuals: residuals,
+            responseScale: metadata.scale, residualKind: metadata.residualKind
         )
+    }
+
+    private static func responseMetadata(
+        for fit: FittedSmoother
+    ) -> (scale: ResponseScale, residualKind: ResidualKind) {
+        guard case .likelihood(let likelihood) = fit else { return (.continuous, .raw) }
+        switch likelihood.family {
+        case .gaussian: return (.continuous, .raw)
+        case .binomial: return (.probability, .pearson)
+        case .poisson: return (.intensity, .pearson)
+        }
     }
 }

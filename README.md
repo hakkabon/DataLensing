@@ -22,11 +22,11 @@ Sources/DataTables/            # Local data-in: streaming CSV, type inference, [
 Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, smoother
                                # choice, decimation, generation gate, chart view + window policy
 Sources/DataLensingApp/        # CLI: bundled samples → fit → terminal report (dogfoods loadChart)
-Sources/DataLensingApp/SampleData/  # sine.csv, steps.csv, outliers.csv (deterministic, documented below)
+Sources/DataLensingApp/SampleData/  # deterministic 1D and 2D examples
 Tests/DataTablesTests/         # Parser, inference, errors, chunk-size independence, 100k streaming
-Tests/DataLensingTests/        # Contract, policy, budgets, refits, decimation, choices, loader, gates
+Tests/DataLensingTests/        # Contracts, diagnostics, surfaces, policies, decimation, loaders
 Viewer/                        # Xcode macOS + iPad app: file/sample/column/smoother pickers,
-                               # scroll + coverage + refit-to-view, click-to-inspect
+                               # diagnostics, 2D surfaces, scroll/refit, click-to-inspect
 ```
 
 `DataTables` lives in-repo (one consumer) as Foundation-only portable
@@ -73,6 +73,8 @@ viewer, which discovers them live — adding a CSV needs no code change):
 - `outliers.csv` — 400 rows of 2x + 1 + N(0, 0.2) with ~6% heavy
   outliers (±3–6) and sparse missing. Robustness demo
   (`Random(7)`, continued stream).
+- `surface.csv` — deterministic 5×5 plane, `response = 2x1 − 3x2 + 4`,
+  for the two-predictor response surface and trend-vector display.
 
 ## Conventions
 
@@ -112,6 +114,13 @@ Chart colours track the system accent colour (System Preferences → General
 → Accent Colour) so the fitted curve and uncertainty band stay visually
 consistent with the rest of the macOS UI.
 
+The display controls also expose a linked first-derivative plot,
+training-point residuals, and a normal QQ plot. Continuous smoothers use raw
+residuals; binomial and Poisson local-likelihood fits use Pearson residuals and
+label fitted values as probabilities or expected counts. Choosing a **Second
+Predictor** fits a regular two-dimensional grid and switches the detail area to
+a Canvas response heatmap with normalized gradient vectors.
+
 ## Performance notes (measured, not assumed)
 
 On 1000 sine rows: parse ≈ 0.01s; full auto-tune ≈ 38s release
@@ -125,8 +134,13 @@ shallow/fast flags, per-leg penalty grids), `FitController` (scroll
 evaluates the cached fit; refit only outside hull × margin; windowed
 subset refits), concurrent grid evaluation, explicit smoother choice
 (auto-tune vs direct legs), min-max point decimation per pixel, and
-planar layer separation (`ChartPlanes`: gridlines, samples, hull, curve)
-with memoized decimation to ensure scrub operations never trigger re-bucketing.
+planar layer separation (`ChartPlanes`: gridlines, samples, hull, curve,
+gradient, residuals, QQ) with keyed memoized decimation so probe operations
+never trigger re-bucketing. A 500k-point debug regression completes the
+one-time 2,000-bucket scan in about 0.84s on the development machine and emits
+at most 4,000 marks; cached probe interactions do no scan. This result did not
+justify a Metal renderer. The 2D grid uses SwiftUI Canvas to avoid thousands of
+Swift Charts mark nodes.
 
 ## Versions
 
@@ -145,7 +159,10 @@ Whittaker picker (Swift-DataLens `0.8.0`) · `0.17.1` tag hygiene ·
 layers + confidence interval probe inspection + memoized decimation ·
 `0.20.0` descriptive statistics sidebar + keyboard shortcuts (⌘O/W/E,
 arrow-key probe stepping) + export fitted grid + accent colour theming
-+ polished empty / loading / error states.
++ polished empty / loading / error states · `0.21.0` viewer build repair +
+scene commands + iPad clipboard, typed response scales, gradient/residual/QQ
+diagnostics, keyed 500k-point decimation cache, and two-predictor Canvas
+surfaces with trend vectors.
 
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).

@@ -20,6 +20,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 #if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
 #endif
 
 /// What the viewer has finished building on a background task. The
@@ -52,6 +54,7 @@ struct ContentView: View {
     @State private var visibleDomain: ClosedRange<Double>?
     @State private var selectedX: String?
     @State private var selectedY: String?
+    @State private var selectedX2: String?
     @State private var selectedSmoother: SmootherChoice = .automatic
     @State private var inspectorX: Double?
     @State private var gate = GenerationGate()
@@ -63,8 +66,11 @@ struct ContentView: View {
 
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
-    /// `SmootherChartView` reference for arrow-key stepping.
-    @State private var chartView: SmootherChartView?
+    @State private var loadedSurface: LoadedSurface?
+    @State private var surfaceWork: Task<Void, Never>?
+    @State private var surfaceError: String?
+    @State private var surfaceLoading = false
+    @State private var surfaceGeneration = 0
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -100,22 +106,13 @@ struct ContentView: View {
             inspectorX = nil
             return .handled
         }
-        .commands {
-            CommandGroup(after: .newItem) {
-                Button("Open CSV…") { showingImporter = true }
-                    .keyboardShortcut("o", modifiers: .command)
-
-                Button("Clear Chart") { clearChart() }
-                    .keyboardShortcut("w", modifiers: .command)
-                    .disabled(!isReady)
-
-                Divider()
-
-                Button("Export Fitted Grid…") { exportFittedGrid() }
-                    .keyboardShortcut("e", modifiers: .command)
-                    .disabled(!isReady)
-            }
-        }
+        .focusedSceneValue(\.viewerCommandActions, ViewerCommandActions(
+            open: { showingImporter = true },
+            clear: clearChart,
+            export: exportFittedGrid,
+            canClear: isReady,
+            canExport: isReady
+        ))
     }
 
     // MARK: - Sidebar
@@ -163,9 +160,18 @@ struct ContentView: View {
                             Text(name).tag(Optional(name))
                         }
                     }
+                    Picker("Second Predictor", selection: $selectedX2) {
+                        Text("None (1D)").tag(Optional<String>.none)
+                        ForEach(built.numericNames.filter { $0 != selectedX && $0 != selectedY }, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
                 }
                 .onChange(of: selectedX) { _, _ in reselectIfNeeded(built) }
                 .onChange(of: selectedY) { _, _ in reselectIfNeeded(built) }
+                .onChange(of: selectedX2) { _, value in
+                    loadSurfaceIfNeeded(built, secondPredictor: value)
+                }
 
                 Section("Statistical Model") {
                     Picker("Algorithm", selection: $selectedSmoother) {
@@ -187,6 +193,9 @@ struct ContentView: View {
                     Toggle("Uncertainty Hull (±2 SE)", isOn: planeBinding(.hull))
                     Toggle("Fitted Curve", isOn: planeBinding(.curve))
                     Toggle("Coordinate Grid", isOn: planeBinding(.gridlines))
+                    Toggle("Gradient", isOn: planeBinding(.gradient))
+                    Toggle("Residuals", isOn: planeBinding(.residuals))
+                    Toggle("Normal QQ Plot", isOn: planeBinding(.qqPlot))
                 }
 
                 Section("Model Information") {
@@ -215,39 +224,28 @@ struct ContentView: View {
                 }
 
                 // ── Descriptive Statistics ────────────────────────────
-                descriptiveStatsSection(for: built.loaded.model)
+                Section("Descriptive Statistics") {
+                    let xs = built.loaded.model.xSummary
+                    let ys = built.loaded.model.ySummary
+                    VStack(alignment: .leading, spacing: 4) {
+                        statsRow(label: "n", x: "\(xs.n)", y: "\(ys.n)")
+                        statsRow(label: "mean", x: fmt6(xs.mean), y: fmt6(ys.mean))
+                        statsRow(label: "std", x: fmt6(xs.std), y: fmt6(ys.std))
+                        statsRow(label: "median", x: fmt6(xs.median), y: fmt6(ys.median))
+                        statsRow(label: "min", x: fmt6(xs.min), y: fmt6(ys.min))
+                        statsRow(label: "max", x: fmt6(xs.max), y: fmt6(ys.max))
+                    }
+                    .font(.caption2.monospaced())
+
+                    Button("Copy Fitted Grid") { exportFittedGrid() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.accentColor)
+                }
             }
         }
         .listStyle(.sidebar)
         .navigationTitle("DataLensing")
-    }
-
-    /// Sidebar section: compact table of X/Y descriptive statistics.
-    @ViewBuilder
-    private func descriptiveStatsSection(for model: ChartModel) -> some View {
-        let xs = model.xSummary
-        let ys = model.ySummary
-        Section("Descriptive Statistics") {
-            VStack(alignment: .leading, spacing: 4) {
-                statsRow(label: "n", x: "\(xs.n)", y: "\(ys.n)")
-                statsRow(label: "mean",
-                         x: fmt6(xs.mean), y: fmt6(ys.mean))
-                statsRow(label: "std",
-                         x: fmt6(xs.std), y: fmt6(ys.std))
-                statsRow(label: "median",
-                         x: fmt6(xs.median), y: fmt6(ys.median))
-                statsRow(label: "min",
-                         x: fmt6(xs.min), y: fmt6(ys.min))
-                statsRow(label: "max",
-                         x: fmt6(xs.max), y: fmt6(ys.max))
-            }
-            .font(.caption2.monospaced())
-
-            Button("Copy Fitted Grid") { exportFittedGrid() }
-                .font(.caption)
-                .buttonStyle(.borderless)
-                .foregroundStyle(.accentColor)
-        }
     }
 
     private func statsRow(label: String, x: String, y: String) -> some View {
@@ -275,7 +273,37 @@ struct ContentView: View {
             fittingView(name: name)
 
         case .ready(let built):
-            VStack(spacing: 12) {
+            if let loadedSurface {
+                VStack(spacing: 12) {
+                    HStack {
+                        Text("\(loadedSurface.responseName) by \(loadedSurface.xName) and \(loadedSurface.yName)")
+                            .font(.headline)
+                        Spacer()
+                        Button("Return to 1D") {
+                            selectedX2 = nil
+                            self.loadedSurface = nil
+                        }
+                    }
+                    SurfaceChartView(
+                        model: loadedSurface.model,
+                        xLabel: loadedSurface.xName,
+                        yLabel: loadedSurface.yName
+                    )
+                    if let surfaceError {
+                        Text(surfaceError).foregroundStyle(.red).font(.caption)
+                    }
+                }
+                .padding()
+            } else {
+                VStack(spacing: 12) {
+                if surfaceLoading {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Fitting 2D surface…").font(.caption)
+                    }
+                } else if let surfaceError {
+                    Text(surfaceError).foregroundStyle(.red).font(.caption)
+                }
                 SmootherChartView(
                     model: built.loaded.model,
                     visibleDomain: $visibleDomain,
@@ -297,13 +325,17 @@ struct ContentView: View {
                     {
                         if built.loaded.model.hasBand {
                             Text(String(
-                                format: "x = %.3f · fitted = %.3f (95%% CI: [%.3f, %.3f])",
-                                x, band.mean, band.lower, band.upper
+                                format: "x = %.3f · %@ = %.3f (95%% CI: [%.3f, %.3f])",
+                                x, built.loaded.model.responseScale.rawValue.lowercased(),
+                                band.mean, band.lower, band.upper
                             ))
                             .font(.caption)
                             .monospaced()
                         } else {
-                            Text(String(format: "x = %.3f · fitted = %.3f", x, band.mean))
+                            Text(String(
+                                format: "x = %.3f · %@ = %.3f", x,
+                                built.loaded.model.responseScale.rawValue.lowercased(), band.mean
+                            ))
                                 .font(.caption)
                                 .monospaced()
                         }
@@ -330,8 +362,9 @@ struct ContentView: View {
                 .padding(.vertical, 6)
                 .background(.bar)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .padding()
             }
-            .padding()
 
         case .failed(let message):
             failedView(message: message)
@@ -529,6 +562,8 @@ struct ContentView: View {
         pb.clearContents()
         pb.setString(tsv, forType: .tabularText)
         pb.setString(tsv, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = tsv
         #endif
     }
 
@@ -541,6 +576,12 @@ struct ContentView: View {
         inspectorX = nil
         selectedX = nil
         selectedY = nil
+        selectedX2 = nil
+        loadedSurface = nil
+        surfaceWork?.cancel()
+        surfaceWork = nil
+        surfaceLoading = false
+        surfaceGeneration += 1
         phase = .idle
     }
 
@@ -568,11 +609,16 @@ struct ContentView: View {
 
     private func open(_ url: URL) {
         work?.cancel()
+        surfaceWork?.cancel()
+        surfaceGeneration += 1
+        surfaceLoading = false
         lastURL = url
         let name = url.lastPathComponent
         visibleDomain = nil  // stale windows must never decimate new data
         selectedX = nil
         selectedY = nil
+        selectedX2 = nil
+        loadedSurface = nil
         inspectorX = nil
         fallback = nil  // fresh open cancels back to idle
         let generation = gate.next()
@@ -610,6 +656,11 @@ struct ContentView: View {
               x != built.controller.xName || y != built.controller.yName
                 || selectedSmoother != built.controller.smoother
         else { return }
+        loadedSurface = nil
+        selectedX2 = nil
+        surfaceWork?.cancel()
+        surfaceGeneration += 1
+        surfaceLoading = false
         work?.cancel()
         fallback = built  // cancel restores this chart
         let generation = gate.next()
@@ -639,6 +690,40 @@ struct ContentView: View {
             } catch {
                 guard gate.isCurrent(generation) else { return }
                 phase = .failed(String(describing: error))
+            }
+        }
+    }
+
+    private func loadSurfaceIfNeeded(_ built: BuiltChart, secondPredictor: String?) {
+        surfaceWork?.cancel()
+        surfaceGeneration += 1
+        let generation = surfaceGeneration
+        surfaceError = nil
+        surfaceLoading = false
+        guard let x1 = selectedX, let x2 = secondPredictor, let response = selectedY,
+              x1 != x2, response != x1, response != x2 else {
+            loadedSurface = nil
+            return
+        }
+        surfaceLoading = true
+        surfaceWork = Task {
+            do {
+                let surface = try await scopedSurface(
+                    from: built.fileURL, x: x1, y: x2, response: response
+                )
+                try Task.checkCancellation()
+                guard generation == surfaceGeneration else { return }
+                loadedSurface = surface
+                surfaceLoading = false
+            } catch is CancellationError {
+                guard generation == surfaceGeneration else { return }
+                surfaceLoading = false
+                return
+            } catch {
+                guard generation == surfaceGeneration else { return }
+                loadedSurface = nil
+                surfaceError = String(describing: error)
+                surfaceLoading = false
             }
         }
     }
@@ -732,5 +817,18 @@ private func scopedFit(
     return BuiltChart(
         controller: controller, loaded: loaded,
         fileName: url.lastPathComponent, fileURL: url, columns: columns
+    )
+}
+
+private func scopedSurface(
+    from url: URL, x: String, y: String, response: String
+) async throws -> LoadedSurface {
+    let didAccess = url.startAccessingSecurityScopedResource()
+    defer {
+        if didAccess { url.stopAccessingSecurityScopedResource() }
+    }
+    return try await loadSurfaceConcurrently(
+        from: url, xColumn: x, yColumn: y, responseColumn: response,
+        budget: .interactive
     )
 }

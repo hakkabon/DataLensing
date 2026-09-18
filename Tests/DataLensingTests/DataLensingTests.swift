@@ -123,6 +123,68 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(sync.mean == concurrent.mean)
     #expect(sync.lower == concurrent.lower)
     #expect(sync.upper == concurrent.upper)
+    #expect(sync.gradient == concurrent.gradient)
+    #expect(sync.residuals == concurrent.residuals)
+}
+
+@Test func chartModelCarriesGradientAndRawResiduals() throws {
+    let (trainX, trainY) = linearFixture()
+    let fit = Loess.fit(trainX: trainX, trainY: trainY, span: 0.5,
+                        degree: 1, robustIterations: 0)!
+    let model = ChartModel.make(trainX: trainX, trainY: trainY,
+                                fit: .loess(fit), gridCount: 25)!
+    #expect(model.responseScale == .continuous)
+    #expect(model.residualKind == .raw)
+    #expect(model.gradient.count == 25)
+    #expect(model.gradient.filter(\.isFinite).allSatisfy { abs($0 - 2) < 1e-8 })
+    #expect(model.residuals.count == trainY.count)
+    #expect(model.residuals.allSatisfy { abs($0) < 1e-8 })
+    #expect(model.residualQQ.observed.count == trainY.count)
+}
+
+@Test func localLikelihoodUsesProbabilityAndPearsonResiduals() throws {
+    let xs = (0..<30).map { [Double($0) / 29] }
+    let ys = (0..<30).map { $0 < 15 ? 0.0 : 1.0 }
+    let fit = LocalLikelihood.fit(trainX: xs, trainY: ys, degree: 1,
+                                  family: .binomial, span: 0.7)!
+    let model = ChartModel.make(trainX: xs, trainY: ys,
+                                fit: .likelihood(fit), gridCount: 20)!
+    #expect(model.responseScale == .probability)
+    #expect(model.residualKind == .pearson)
+    #expect(model.mean.allSatisfy { $0 >= 0 && $0 <= 1 })
+}
+
+@Test func twoDimensionalSurfaceRecoversPlaneGradient() throws {
+    var xs: [[Double]] = []
+    var ys: [Double] = []
+    for y in 0..<6 {
+        for x in 0..<6 {
+            xs.append([Double(x), Double(y)])
+            ys.append(2 * Double(x) - 3 * Double(y) + 4)
+        }
+    }
+    let fit = Loess.fit(trainX: xs, trainY: ys, span: 0.75,
+                        degree: 1, robustIterations: 0)!
+    let surface = SurfaceModel.make(trainX: xs, fit: .loess(fit),
+                                    xCount: 12, yCount: 10)!
+    #expect(surface.mean.count == 120)
+    #expect(surface.gradientX.filter(\.isFinite).allSatisfy { abs($0 - 2) < 1e-7 })
+    #expect(surface.gradientY.filter(\.isFinite).allSatisfy { abs($0 + 3) < 1e-7 })
+    #expect(surface.valueRange != nil)
+}
+
+@Test func decimationHandlesHalfMillionPointsWithinInteractiveBudget() {
+    let count = 500_000
+    let xs = (0..<count).map(Double.init)
+    let ys = xs.map { sin($0 * 0.001) }
+    let clock = ContinuousClock()
+    let start = clock.now
+    let result = Decimation.decimate(x: xs, y: ys, buckets: 2_000)
+    let elapsed = start.duration(to: clock.now)
+    #expect(result.x.count <= 4_000)
+    // This guards accidental super-linear regressions, not a 120-fps promise:
+    // the scan occurs only when the viewport key changes and is cached afterward.
+    #expect(elapsed < .seconds(2))
 }
 
 @Test func inspectColumnsReportsNamesAndNumeric() throws {
@@ -547,4 +609,3 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         #expect(line.filter { $0 == "\t" }.count == 3)
     }
 }
-
