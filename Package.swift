@@ -13,13 +13,11 @@ let package = Package(
         .executable(name: "data-lensing-app", targets: ["DataLensingApp"]),
     ],
     dependencies: [
-        // Pinned by revision, not version: Swift-DataLens still pins
-        // Swift-NumericCore by revision (see its DECISIONS #9), so any
-        // stable-version requirement on Swift-DataLens fails to resolve
-        // ("depends on an unstable-version package"). This revision IS
-        // tag 0.9.0 content.
-        // Switch back to `.upToNextMinor(from: "0.9.1")` once upstream
-        // tags a release that depends on NumericCore by version.
+        // Phase-1 diagnostics live one commit beyond Swift-DataLens 0.9.0.
+        // Keep the exact revision until that work is tagged; then replace
+        // this with `.upToNextMinor(from: "0.10.0")`. Swift-DataLens itself
+        // now has a stable Swift-NumericCore 0.3.x requirement, so there is
+        // no longer a transitive unstable-version blocker.
         .package(url: "https://github.com/hakkabon/Swift-DataLens.git", revision: "c73c10e341a95deedaea39c1a84c360f44d7d7da"),
     ],
     targets: [

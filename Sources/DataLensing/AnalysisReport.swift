@@ -39,6 +39,7 @@ public struct AnalysisReport: Codable, Sendable, Hashable {
     public let inputObservationCount: Int
     public let retainedObservationCount: Int
     public let droppedObservationCount: Int
+    public let assessment: ModelAssessment?
     public let observations: [Observation]
 
     /// Build a report from the public frontend result. `sourceRow` is
@@ -64,7 +65,7 @@ public struct AnalysisReport: Codable, Sendable, Hashable {
             )
         }
         return AnalysisReport(
-            schemaVersion: 1, createdAt: createdAt,
+            schemaVersion: 2, createdAt: createdAt,
             source: Source(fileName: sourceURL.lastPathComponent,
                            byteCount: byteCount, modifiedAt: modifiedAt),
             model: Model(
@@ -78,6 +79,7 @@ public struct AnalysisReport: Codable, Sendable, Hashable {
             inputObservationCount: inputObservationCount,
             retainedObservationCount: observations.count,
             droppedObservationCount: max(0, inputObservationCount - observations.count),
+            assessment: ModelAssessment.make(from: loaded.model),
             observations: observations
         )
     }

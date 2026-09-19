@@ -10,7 +10,7 @@ import DataLens
 import Foundation
 
 /// Semantic scale of fitted values shown by the frontend.
-public enum ResponseScale: String, Sendable, Hashable {
+public enum ResponseScale: String, Codable, Sendable, Hashable {
     case continuous = "Response"
     case probability = "Probability"
     case intensity = "Expected count"

@@ -622,18 +622,60 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let report = AnalysisReport.make(from: loaded, sourceURL: url,
                                      inputObservationCount: 4, createdAt: date)
 
-    #expect(report.schemaVersion == 1)
+    #expect(report.schemaVersion == 2)
     #expect(report.source.fileName.hasSuffix(".csv"))
     #expect(report.inputObservationCount == 4)
     #expect(report.retainedObservationCount == 3)
     #expect(report.droppedObservationCount == 1)
     #expect(report.observations.map(\.sourceRow) == [0, 1, 3])
     #expect(report.observations.last?.residual == nil)
+    #expect(report.assessment?.observationCount == 2)
 
     let json = try #require(String(data: report.jsonData(), encoding: .utf8))
-    #expect(json.contains("\"schemaVersion\" : 1"))
+    #expect(json.contains("\"schemaVersion\" : 2"))
     #expect(json.contains("\"createdAt\" : \"2023-11-14T22:13:20Z\""))
     let csv = report.observationsCSV()
     #expect(csv.hasPrefix("source_row,time,value,fitted,residual\n"))
     #expect(csv.split(separator: "\n").count == 4)
+}
+
+@Test func continuousAssessmentReportsFitAndResidualStructure() throws {
+    let model = ChartModel(
+        rawX: [0, 1, 2, 3, 4], rawY: [1, 3, 5, 7, 9],
+        gridX: [0, 1, 2, 3, 4], mean: [1, 3, 5, 7, 9],
+        fittedAtTraining: [1, 3, 5, 7, 9], residuals: [0, 0, 0, 0, 0]
+    )
+    let result = try #require(ModelAssessment.make(from: model))
+    #expect(result.responseScale == .continuous)
+    #expect(result.rootMeanSquaredError == 0)
+    #expect(result.rSquared == 1)
+    #expect(result.devianceExplained == nil)
+    #expect(result.largeResidualCount == 0)
+}
+
+@Test func binomialAssessmentUsesDevianceRatherThanRSquared() throws {
+    let observed = [0.0, 0, 1, 1]
+    let fitted = [0.1, 0.2, 0.8, 0.9]
+    let residuals = zip(observed, fitted).map { ($0 - $1) / sqrt($1 * (1 - $1)) }
+    let model = ChartModel(rawX: [0, 1, 2, 3], rawY: observed,
+                           gridX: [0, 1, 2, 3], mean: fitted,
+                           fittedAtTraining: fitted, residuals: residuals,
+                           responseScale: .probability, residualKind: .pearson)
+    let result = try #require(ModelAssessment.make(from: model))
+    #expect(result.rSquared == nil)
+    #expect(try #require(result.devianceExplained) > 0.5)
+    #expect(try #require(result.deviancePerObservation) > 0)
+}
+
+@Test func countAssessmentFlagsWeakNullModel() throws {
+    let observed = [0.0, 4, 0, 4]
+    let fitted = [2.0, 2, 2, 2]
+    let residuals = zip(observed, fitted).map { ($0 - $1) / sqrt($1) }
+    let model = ChartModel(rawX: [0, 1, 2, 3], rawY: observed,
+                           gridX: [0, 1, 2, 3], mean: fitted,
+                           fittedAtTraining: fitted, residuals: residuals,
+                           responseScale: .intensity, residualKind: .pearson)
+    let result = try #require(ModelAssessment.make(from: model))
+    #expect(abs(try #require(result.devianceExplained)) < 1e-12)
+    #expect(result.findings.contains { $0.code == "low-deviance-explained" })
 }

@@ -224,6 +224,42 @@ struct ContentView: View {
                     }
                 }
 
+                if let assessment = ModelAssessment.make(from: built.loaded.model) {
+                    Section("Model Diagnostics") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            LabeledContent("RMSE", value: fmt6(assessment.rootMeanSquaredError))
+                            LabeledContent("MAE", value: fmt6(assessment.meanAbsoluteError))
+                            if let value = assessment.rSquared {
+                                LabeledContent("R²", value: fmt6(value))
+                            }
+                            if let value = assessment.devianceExplained {
+                                LabeledContent("Deviance explained", value: String(format: "%.1f%%", 100 * value))
+                            }
+                            if let value = assessment.qqCorrelation {
+                                LabeledContent("QQ correlation", value: fmt6(value))
+                            }
+                            if let value = assessment.residualLagOneCorrelation {
+                                LabeledContent("Residual lag-1", value: fmt6(value))
+                            }
+                        }
+                        .font(.caption2.monospacedDigit())
+
+                        if assessment.findings.isEmpty {
+                            Label("No threshold warnings", systemImage: "checkmark.circle")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(assessment.findings, id: \.code) { finding in
+                                Label(finding.message,
+                                      systemImage: finding.severity == .caution
+                                        ? "exclamationmark.triangle" : "info.circle")
+                                    .font(.caption2)
+                                    .foregroundStyle(finding.severity == .caution ? .orange : .secondary)
+                            }
+                        }
+                    }
+                }
+
                 // ── Descriptive Statistics ────────────────────────────
                 Section("Descriptive Statistics") {
                     let xs = built.loaded.model.xSummary

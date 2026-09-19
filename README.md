@@ -175,6 +175,22 @@ DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
 their shared solver fixture. Tagged backend releases can dispatch the same
 check immediately; the weekly run is the no-secret fallback.
 
+## Statistical workflow
+
+The frontend now turns a fitted chart into a family-aware `ModelAssessment`.
+Continuous fits report RMSE, MAE, bias, R², normal-QQ correlation, residual
+autocorrelation, and standardized-residual counts. Binary and count fits use
+model-appropriate deviance and null-deviance reduction rather than presenting
+R² as though it had the same meaning. Threshold findings call out residual
+bias, heavy/non-normal residuals, remaining x-ordered structure, and weak
+deviance reduction. These checks are descriptive training diagnostics—not
+out-of-sample validation—and the API and report state that limitation.
+
+The viewer displays the assessment beside the model and includes its complete
+machine-readable form in every analysis-report JSON export. This keeps the
+interactive review, copied report, and automated consumers on one calculation
+path.
+
 Upstream is pinned by commit revision (it pins NumericCore by revision,
 so stable-version requirements can't resolve — see `Package.swift`).
 Re-pin on each upstream tag; the pin comment records which tag the hash is.
