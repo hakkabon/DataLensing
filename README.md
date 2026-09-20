@@ -17,7 +17,7 @@ fits (pinned upstream by test).
 ## Layout
 
 ```
-Package.swift                  # DataTables + DataLensing + CLI; pins Swift-DataLens by revision
+Package.swift                  # DataTables + DataLensing + CLI; semantic Swift-DataLens release range
 Sources/DataTables/            # Local data-in: streaming CSV, type inference, [[Double]] extraction
 Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, smoother
                                # choice, decimation, generation gate, chart view + window policy
@@ -45,7 +45,7 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 56 tests (see below)
+swift test                         # 62 tests (see below)
 swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
@@ -135,12 +135,12 @@ evaluates the cached fit; refit only outside hull × margin; windowed
 subset refits), concurrent grid evaluation, explicit smoother choice
 (auto-tune vs direct legs), min-max point decimation per pixel, and
 planar layer separation (`ChartPlanes`: gridlines, samples, hull, curve,
-gradient, residuals, QQ) with keyed memoized decimation so probe operations
-never trigger re-bucketing. A 500k-point debug regression completes the
-one-time 2,000-bucket scan in about 0.84s on the development machine and emits
-at most 4,000 marks; cached probe interactions do no scan. This result did not
-justify a Metal renderer. The 2D grid uses SwiftUI Canvas to avoid thousands of
-Swift Charts mark nodes.
+gradient, residuals, QQ), and `DecimationIndex`. The index is built once on a
+background task and uses a min/max segment tree, so a 500k-point viewport
+query touches at most the requested buckets × logarithmic lookups rather than
+rescanning 500k rows. It emits at most two Swift Charts marks per display
+pixel; probe interactions and scrolling never refit or re-sort data. The 2D
+grid uses SwiftUI Canvas to avoid thousands of Swift Charts mark nodes.
 
 ## Versions
 

@@ -32,6 +32,12 @@ public struct ChartModel: Sendable {
     public let rawX: [Double]
     /// Surviving training responses (post-`droppingMissing`, in order).
     public let rawY: [Double]
+    /// Per-model raw-data identity used by stateful render caches.
+    ///
+    /// This is an opaque in-process fingerprint, not a durable data checksum.
+    /// It ensures a SwiftUI chart rebuilds its dense-point index when a new
+    /// fit has the same count/endpoints but different interior observations.
+    public let rawPointFingerprint: Int
     /// Evaluation grid (evenly spaced over the training hull).
     public let gridX: [Double]
     /// Fitted mean on the grid.
@@ -70,6 +76,11 @@ public struct ChartModel: Sendable {
                      "residuals must be empty or match rawX")
         self.rawX = rawX
         self.rawY = rawY
+        var hasher = Hasher()
+        hasher.combine(rawX.count)
+        for value in rawX { hasher.combine(value) }
+        for value in rawY { hasher.combine(value) }
+        self.rawPointFingerprint = hasher.finalize()
         self.gridX = gridX
         self.mean = mean
         self.lower = lower

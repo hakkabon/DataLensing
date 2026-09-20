@@ -56,8 +56,9 @@ public struct ChartPlanes: OptionSet, Sendable, Hashable {
 /// 4. **Curve Plane**: Crisp vector line for the fitted smoothed mean — drawn in the system accent colour.
 /// 5. **Probe Plane**: Interactive selection cursor and confidence interval readout.
 ///
-/// The points layer is min-max decimated to one bucket per pixel of
-/// plot width and memoized so scrubbing the probe does not re-decimate points.
+/// The points layer is min-max decimated to one bucket per pixel of plot
+/// width. Dense inputs build a background `DecimationIndex`, so viewport
+/// changes query a segment tree instead of rescanning every source row.
 ///
 /// Arrow-key probe stepping is supported: call `steppedSelection(by:)` from
 /// the parent to advance/rewind `xSelection` to the nearest grid neighbour.
@@ -72,6 +73,7 @@ public struct SmootherChartView: View {
     @State private var plotWidth: CGFloat = 600
     @State private var cachedPoints: (x: [Double], y: [Double]) = ([], [])
     @State private var cachedKey: DecimationKey?
+    @State private var decimationIndex: DecimationIndex?
 
     private struct DecimationKey: Hashable {
         let lower: Double?
@@ -80,6 +82,10 @@ public struct SmootherChartView: View {
         let count: Int
         let firstX: Double?
         let lastX: Double?
+    }
+
+    private struct SourceKey: Hashable {
+        let fingerprint: Int
     }
 
     public init(
@@ -166,10 +172,25 @@ public struct SmootherChartView: View {
                 cachedKey = key
                 return
             }
-            cachedPoints = Decimation.decimate(
-                x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: key.buckets
-            )
+            guard let decimationIndex else { return }
+            cachedPoints = decimationIndex.decimate(visible: visibleDomain, buckets: key.buckets)
             cachedKey = key
+        }
+        .task(id: sourceKey) {
+            decimationIndex = nil
+            cachedPoints = ([], [])
+            cachedKey = nil
+            let x = model.rawX
+            let y = model.rawY
+            let index = await Task.detached(priority: .userInitiated) {
+                DecimationIndex(x: x, y: y)
+            }.value
+            guard !Task.isCancelled else { return }
+            decimationIndex = index
+            let currentKey = decimationKey
+            guard planes.contains(.samples) else { return }
+            cachedPoints = index.decimate(visible: visibleDomain, buckets: currentKey.buckets)
+            cachedKey = currentKey
         }
     }
 
@@ -182,12 +203,17 @@ public struct SmootherChartView: View {
         )
     }
 
+    private var sourceKey: SourceKey {
+        SourceKey(
+            fingerprint: model.rawPointFingerprint
+        )
+    }
+
     private func currentDecimatedPoints(for key: DecimationKey) -> (x: [Double], y: [Double]) {
         guard planes.contains(.samples) else { return ([], []) }
         if cachedKey == key { return cachedPoints }
-        return Decimation.decimate(
-            x: model.rawX, y: model.rawY, visible: visibleDomain, buckets: key.buckets
-        )
+        guard let decimationIndex else { return ([], []) }
+        return decimationIndex.decimate(visible: visibleDomain, buckets: key.buckets)
     }
 
     private func chart(points: (x: [Double], y: [Double])) -> some View {

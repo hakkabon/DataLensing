@@ -13,12 +13,12 @@ let package = Package(
         .executable(name: "data-lensing-app", targets: ["DataLensingApp"]),
     ],
     dependencies: [
-        // Phase-1 diagnostics live one commit beyond Swift-DataLens 0.9.0.
-        // Keep the exact revision until that work is tagged; then replace
-        // this with `.upToNextMinor(from: "0.10.0")`. Swift-DataLens itself
-        // now has a stable Swift-NumericCore 0.3.x requirement, so there is
-        // no longer a transitive unstable-version blocker.
-        .package(url: "https://github.com/hakkabon/Swift-DataLens.git", revision: "c73c10e341a95deedaea39c1a84c360f44d7d7da"),
+        // Swift-DataLens 0.12.0 carries the Phase 1–3 statistical APIs,
+        // including diagnostics and additive models. Its 0.3.x NumericCore
+        // requirement is itself semantically versioned, so this consumer can
+        // now use a normal, reproducible release range rather than a commit.
+        .package(url: "https://github.com/hakkabon/Swift-DataLens.git",
+                 .upToNextMinor(from: "0.12.0")),
     ],
     targets: [
         .target(

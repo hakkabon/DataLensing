@@ -187,6 +187,50 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(elapsed < .seconds(2))
 }
 
+@Test func decimationIndexMatchesBucketEnvelopesAndQueriesWindows() {
+    // Deliberately unsorted with repeated x values: the index must sort once
+    // but still preserve each bucket's extrema and visible-window boundary.
+    let x = [2.0, 0.0, 1.0, 1.0, 3.0, 4.0, .nan]
+    let y = [8.0, 4.0, -3.0, 7.0, 2.0, 9.0, 1.0]
+    let index = DecimationIndex(x: x, y: y)
+    #expect(!index.isEmpty)
+    let full = index.decimate(buckets: 4)
+    #expect(full.x.count <= 8)
+    #expect(zip(full.x, full.y).contains { $0.0 == 1 && $0.1 == -3 })
+    #expect(zip(full.x, full.y).contains { $0.0 == 1 && $0.1 == 7 })
+
+    let window = index.decimate(visible: 0.5...2.5, buckets: 8)
+    #expect(window.x.allSatisfy { $0 >= 0.5 && $0 <= 2.5 })
+    #expect(zip(window.x, window.y).contains { $0.0 == 1 && $0.1 == -3 })
+    #expect(index.decimate(visible: 10...20, buckets: 8).x.isEmpty)
+}
+
+@Test func decimationIndexMakesDenseViewportQueriesBounded() {
+    let count = 500_000
+    let x = (0..<count).map(Double.init)
+    let y = x.map { sin($0 * 0.001) }
+    let clock = ContinuousClock()
+    let start = clock.now
+    let index = DecimationIndex(x: x, y: y)
+    let built = start.duration(to: clock.now)
+    let queryStart = clock.now
+    let visible = index.decimate(visible: 120_000...120_800, buckets: 1_000)
+    let queried = queryStart.duration(to: clock.now)
+    #expect(visible.x.count <= 2_000)
+    // Building happens once off the main rendering path. Repeated viewport
+    // queries must stay comfortably inside an interactive-frame budget.
+    #expect(built < .seconds(4))
+    #expect(queried < .milliseconds(100))
+}
+
+@Test func chartModelRawFingerprintInvalidatesEqualShapeData() {
+    let first = ChartModel(rawX: [0, 1, 2], rawY: [1, 2, 3],
+                           gridX: [0, 2], mean: [1, 3])
+    let changedInterior = ChartModel(rawX: [0, 1, 2], rawY: [1, 20, 3],
+                                     gridX: [0, 2], mean: [1, 3])
+    #expect(first.rawPointFingerprint != changedInterior.rawPointFingerprint)
+}
+
 @Test func inspectColumnsReportsNamesAndNumeric() throws {
     let url = try scratchCSV("time,height,label,day\n0,1.0,a,2024-01-01\n1,3.0,b,2024-01-02\n")
     defer { try? FileManager.default.removeItem(at: url) }
