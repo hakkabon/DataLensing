@@ -13,6 +13,7 @@ struct ViewerCommandActions {
     let clear: () -> Void
     let export: () -> Void
     let exportReport: () -> Void
+    let exportSession: () -> Void
     let canClear: Bool
     let canExport: Bool
 }
@@ -48,6 +49,10 @@ private struct ViewerCommands: Commands {
 
             Button("Copy Analysis Report") { actions?.exportReport() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(actions?.canExport != true)
+
+            Button("Copy Workbench Session") { actions?.exportSession() }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
                 .disabled(actions?.canExport != true)
         }
     }

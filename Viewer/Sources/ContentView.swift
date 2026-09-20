@@ -72,6 +72,11 @@ struct ContentView: View {
     @State private var surfaceLoading = false
     @State private var surfaceGeneration = 0
 
+    @State private var workbenchOutputs: [WorkbenchOutput] = []
+    @State private var workbenchTask: Task<Void, Never>?
+    @State private var workbenchLoading = false
+    @State private var workbenchError: String?
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebarContent
@@ -111,6 +116,7 @@ struct ContentView: View {
             clear: clearChart,
             export: exportFittedGrid,
             exportReport: exportAnalysisReport,
+            exportSession: exportWorkbenchSession,
             canClear: isReady,
             canExport: isReady
         ))
@@ -279,6 +285,52 @@ struct ContentView: View {
                         .buttonStyle(.borderless)
                         .foregroundStyle(Color.accentColor)
                     Button("Copy Analysis Report") { exportAnalysisReport() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                Section("Workbench") {
+                    Button {
+                        runWorkbench(for: built)
+                    } label: {
+                        if workbenchLoading {
+                            Label("Running Tools…", systemImage: "gearshape.2")
+                        } else {
+                            Label(
+                                workbenchOutputs.isEmpty ? "Run Built-in Tools" : "Refresh Built-in Tools",
+                                systemImage: "slider.horizontal.3"
+                            )
+                        }
+                    }
+                    .disabled(workbenchLoading)
+
+                    if let workbenchError {
+                        Label(workbenchError, systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+
+                    ForEach(workbenchOutputs) { output in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(output.title).font(.caption.bold())
+                            Text(output.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            ForEach(output.metrics.prefix(4)) { metric in
+                                LabeledContent(metric.label, value: workbenchMetricValue(metric))
+                                    .font(.caption2.monospacedDigit())
+                            }
+                            if let table = output.table, let first = table.rows.first {
+                                Text("Largest: \(first.joined(separator: " · "))")
+                                    .font(.caption2.monospaced())
+                                    .lineLimit(1)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Button("Copy Workbench Session") { exportWorkbenchSession() }
                         .font(.caption)
                         .buttonStyle(.borderless)
                         .foregroundStyle(Color.accentColor)
@@ -628,6 +680,73 @@ struct ContentView: View {
         #endif
     }
 
+    /// Copy workspace choices (not the source file or its path) as a
+    /// versioned JSON session that another host can validate and replay.
+    private func exportWorkbenchSession() {
+        guard case .ready(let built) = phase,
+              let source = try? WorkbenchSource(
+                  displayName: built.fileName, inputObservationCount: built.controller.trainY.count
+              ),
+              let session = try? WorkbenchSession(
+                  source: source, predictor: built.controller.xName, response: built.controller.yName,
+                  secondPredictor: selectedX2, smoother: built.controller.smoother,
+                  budget: built.controller.budget, activePlanesRawValue: activePlanes.rawValue,
+                  enabledToolIDs: WorkbenchCatalog.builtIns.toolIDs
+              ),
+              let data = try? session.jsonData(), let json = String(data: data, encoding: .utf8)
+        else { return }
+        #if canImport(AppKit)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(json, forType: NSPasteboard.PasteboardType("public.json"))
+        pb.setString(json, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = json
+        #endif
+    }
+
+    /// Run the portable catalog off the main actor. The catalog's input has no
+    /// view or URL dependency, so a future host can use the exact same tools.
+    private func runWorkbench(for built: BuiltChart) {
+        workbenchTask?.cancel()
+        workbenchOutputs = []
+        workbenchError = nil
+        guard let source = try? WorkbenchSource(
+            displayName: built.fileName, inputObservationCount: built.controller.trainY.count
+        ), let input = try? WorkbenchInput(
+            loaded: built.loaded, source: source, sourceRows: built.controller.keptFileIndices
+        ) else {
+            workbenchError = "Could not prepare this chart for the workbench."
+            return
+        }
+        workbenchLoading = true
+        workbenchTask = Task {
+            do {
+                let outputs = try await Task.detached(priority: .userInitiated) {
+                    try await WorkbenchCatalog.builtIns.runAll(on: input)
+                }.value
+                guard !Task.isCancelled else { return }
+                workbenchOutputs = outputs
+                workbenchLoading = false
+            } catch is CancellationError {
+                guard !Task.isCancelled else { return }
+                workbenchLoading = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                workbenchError = String(describing: error)
+                workbenchLoading = false
+            }
+        }
+    }
+
+    private func clearWorkbench() {
+        workbenchTask?.cancel()
+        workbenchTask = nil
+        workbenchOutputs = []
+        workbenchError = nil
+        workbenchLoading = false
+    }
+
     private func clearChart() {
         work?.cancel()
         work = nil
@@ -643,6 +762,7 @@ struct ContentView: View {
         surfaceWork = nil
         surfaceLoading = false
         surfaceGeneration += 1
+        clearWorkbench()
         phase = .idle
     }
 
@@ -681,6 +801,7 @@ struct ContentView: View {
         selectedX2 = nil
         loadedSurface = nil
         inspectorX = nil
+        clearWorkbench()
         fallback = nil  // fresh open cancels back to idle
         let generation = gate.next()
         let smoother = selectedSmoother  // sticky preference across files
@@ -717,6 +838,7 @@ struct ContentView: View {
               x != built.controller.xName || y != built.controller.yName
                 || selectedSmoother != built.controller.smoother
         else { return }
+        clearWorkbench()
         loadedSurface = nil
         selectedX2 = nil
         surfaceWork?.cancel()
@@ -792,6 +914,7 @@ struct ContentView: View {
     /// Windowed refit to the live viewport: subset, spend the budget,
     /// keep the old chart on cancel or when the window turns out covered.
     private func refitToView(_ built: BuiltChart, _ domain: ClosedRange<Double>) {
+        clearWorkbench()
         work?.cancel()
         fallback = built  // cancel restores this chart
         let generation = gate.next()
@@ -836,6 +959,10 @@ struct ContentView: View {
     // MARK: - Formatting helpers
 
     private func fmt6(_ v: Double) -> String { String(format: "%.6g", v) }
+
+    private func workbenchMetricValue(_ metric: WorkbenchMetric) -> String {
+        metric.text ?? metric.value.map(fmt6) ?? "Unavailable"
+    }
 }
 
 /// Parse instantly, then spend the interactive budget in the

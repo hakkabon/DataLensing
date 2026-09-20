@@ -21,6 +21,7 @@ Package.swift                  # DataTables + DataLensing + CLI; semantic Swift-
 Sources/DataTables/            # Local data-in: streaming CSV, type inference, [[Double]] extraction
 Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, smoother
                                # choice, decimation, generation gate, chart view + window policy
+                               # plus portable workbench tools and replayable sessions
 Sources/DataLensingApp/        # CLI: bundled samples → fit → terminal report (dogfoods loadChart)
 Sources/DataLensingApp/SampleData/  # deterministic 1D and 2D examples
 Tests/DataTablesTests/         # Parser, inference, errors, chunk-size independence, 100k streaming
@@ -45,7 +46,7 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 62 tests (see below)
+swift test                         # 65 tests (see below)
 swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
@@ -101,6 +102,7 @@ viewer, which discovers them live — adding a CSV needs no code change):
 | `⌘O` | Open CSV file picker |
 | `⌘W` | Clear chart (back to idle) |
 | `⌘E` | Export fitted grid to clipboard (tab-separated: x, fit, lower, upper) |
+| `⌘⇧W` | Copy the current workbench configuration as versioned JSON |
 | `←` / `→` | Step the probe cursor one grid point left / right (with smooth animation) |
 | `Escape` | Dismiss probe cursor |
 | Click / drag | Set probe to clicked x position |
@@ -191,6 +193,32 @@ machine-readable form in every analysis-report JSON export. This keeps the
 interactive review, copied report, and automated consumers on one calculation
 path.
 
-Upstream is pinned by commit revision (it pins NumericCore by revision,
-so stable-version requirements can't resolve — see `Package.swift`).
-Re-pin on each upstream tag; the pin comment records which tag the hash is.
+## Extensible workbench
+
+`WorkbenchTool` is the extension seam for additional statistical panels. A
+tool accepts a `WorkbenchInput` (the public `LoadedChart`, a path-free source
+identity, and optional retained-row join keys) and returns a portable
+`WorkbenchOutput`: summary, metrics, and an optional rectangular table. The
+validated `WorkbenchCatalog` preserves display/execution order and makes a
+duplicate or unknown tool identifier an explicit error. It carries no SwiftUI,
+file-system, or parser state, so the same tool can be hosted by the viewer, a
+CLI, or a future automation.
+
+The built-in catalog contains descriptive statistics, family-aware model
+assessment, and a largest-residual review table. The viewer runs it explicitly
+from the **Workbench** sidebar section; fitting, chart scrolling, and surface
+rendering never run analysis panels implicitly. Refitting or replacing a chart
+cancels and clears stale results.
+
+`WorkbenchSession` captures the selected columns, smoother, complete tuning
+budget, active planes, enabled tool identifiers, and a source display name +
+row count in schema-versioned JSON. It deliberately excludes absolute paths
+and source data. A host loading a session must ask for a source file, then can
+validate and replay the recorded configuration. **Copy Workbench Session** is
+available from the sidebar and `⌘⇧W` on macOS.
+
+Swift package resolution uses compatible tagged release ranges:
+DataLensing consumes Swift-DataLens `0.12.x`, which in turn resolves its
+compatible Swift-NumericCore release. The ecosystem compatibility workflow
+continues to exercise source-head integration separately from these stable
+consumer constraints.

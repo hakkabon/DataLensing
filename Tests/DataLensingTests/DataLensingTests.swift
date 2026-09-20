@@ -683,6 +683,55 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(csv.split(separator: "\n").count == 4)
 }
 
+@Test func builtInWorkbenchToolsProducePortableOrderedResults() async throws {
+    let model = ChartModel(
+        rawX: [0, 1, 2], rawY: [1, 3, 20], gridX: [0, 1, 2], mean: [1, 3, 5],
+        fittedAtTraining: [1, 3, 5], residuals: [0, 0, 15]
+    )
+    let loaded = LoadedChart(model: model, summary: nil, smootherName: "Loess",
+                             xName: "time", yName: "value", keptIndices: [0, 1, 2])
+    let source = try WorkbenchSource(displayName: "observations.csv", inputObservationCount: 4)
+    let input = try WorkbenchInput(loaded: loaded, source: source, sourceRows: [4, 8, 12])
+
+    let outputs = try await WorkbenchCatalog.builtIns.runAll(on: input)
+    #expect(outputs.map(\.id) == ["descriptive-statistics", "model-assessment", "residual-review"])
+    #expect(outputs[0].metrics.first(where: { $0.id == "retained-observations" })?.value == 3)
+    #expect(outputs[2].table?.rows.first == ["12", "2", "20", "5", "15", "15"])
+
+    #expect(throws: WorkbenchError.duplicateToolIdentifier("descriptive-statistics")) {
+        _ = try WorkbenchCatalog(tools: [DescriptiveWorkbenchTool(), DescriptiveWorkbenchTool()])
+    }
+    await #expect(throws: WorkbenchError.unknownTool("missing")) {
+        _ = try await WorkbenchCatalog.builtIns.run(id: "missing", on: input)
+    }
+}
+
+@Test func workbenchSessionRoundTripsAndRejectsUnknownSchemas() throws {
+    let source = try WorkbenchSource(displayName: "observations.csv", inputObservationCount: 40)
+    let budget = TuningBudget(
+        degree: 1, spans: [0.3, 0.6], robustIterations: 2, gridCount: 120,
+        fastAdaptivePrediction: true, adaptiveContender: false, smoothingPenalty: 4
+    )
+    let session = try WorkbenchSession(
+        source: source, predictor: "time", response: "value", secondPredictor: "temperature",
+        smoother: .whittaker, budget: budget, activePlanesRawValue: 7,
+        enabledToolIDs: WorkbenchCatalog.builtIns.toolIDs
+    )
+    let data = try session.jsonData()
+    let restored = try WorkbenchSession(jsonData: data)
+    #expect(restored == session)
+    #expect(restored.tuning.tuningBudget == budget)
+    #expect(restored.smootherChoice == .whittaker)
+
+    let json = try #require(String(data: data, encoding: .utf8))
+    let unsupported = try #require(json.replacingOccurrences(
+        of: "\"schemaVersion\" : 1", with: "\"schemaVersion\" : 99"
+    ).data(using: .utf8))
+    #expect(throws: WorkbenchSessionError.unsupportedSchema(99)) {
+        _ = try WorkbenchSession(jsonData: unsupported)
+    }
+}
+
 @Test func continuousAssessmentReportsFitAndResidualStructure() throws {
     let model = ChartModel(
         rawX: [0, 1, 2, 3, 4], rawY: [1, 3, 5, 7, 9],
