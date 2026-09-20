@@ -694,9 +694,9 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let input = try WorkbenchInput(loaded: loaded, source: source, sourceRows: [4, 8, 12])
 
     let outputs = try await WorkbenchCatalog.builtIns.runAll(on: input)
-    #expect(outputs.map(\.id) == ["descriptive-statistics", "model-assessment", "residual-review"])
+    #expect(outputs.map(\.id) == ["descriptive-statistics", "model-assessment", "cross-validation", "residual-review"])
     #expect(outputs[0].metrics.first(where: { $0.id == "retained-observations" })?.value == 3)
-    #expect(outputs[2].table?.rows.first == ["12", "2", "20", "5", "15", "15"])
+    #expect(outputs[3].table?.rows.first == ["12", "2", "20", "5", "15", "15"])
 
     #expect(throws: WorkbenchError.duplicateToolIdentifier("descriptive-statistics")) {
         _ = try WorkbenchCatalog(tools: [DescriptiveWorkbenchTool(), DescriptiveWorkbenchTool()])
@@ -722,14 +722,52 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(restored == session)
     #expect(restored.tuning.tuningBudget == budget)
     #expect(restored.smootherChoice == .whittaker)
+    #expect(restored.validationConfiguration.specification.degree == budget.degree)
+    #expect(restored.validationConfiguration.specification.spans == budget.spans)
+
+    var legacyObject = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    legacyObject["schemaVersion"] = 1
+    legacyObject.removeValue(forKey: "validationConfiguration")
+    let legacy = try JSONSerialization.data(withJSONObject: legacyObject, options: [.sortedKeys])
+    let decodedLegacy = try WorkbenchSession(jsonData: legacy)
+    #expect(decodedLegacy.schemaVersion == 1)
+    #expect(decodedLegacy.validationConfiguration.specification.degree == budget.degree)
 
     let json = try #require(String(data: data, encoding: .utf8))
     let unsupported = try #require(json.replacingOccurrences(
-        of: "\"schemaVersion\" : 1", with: "\"schemaVersion\" : 99"
+        of: "\"schemaVersion\" : 2", with: "\"schemaVersion\" : 99"
     ).data(using: .utf8))
     #expect(throws: WorkbenchSessionError.unsupportedSchema(99)) {
         _ = try WorkbenchSession(jsonData: unsupported)
     }
+}
+
+@Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {
+    let xs = (0..<20).map { Double($0) / 5 }
+    let ys = xs.map { 1.5 * $0 + 0.25 }
+    let model = ChartModel(
+        rawX: xs, rawY: ys, gridX: xs, mean: ys,
+        fittedAtTraining: ys, residuals: Array(repeating: 0, count: ys.count)
+    )
+    let loaded = LoadedChart(model: model, summary: nil, smootherName: "Loess",
+                             xName: "time", yName: "value", keptIndices: Array(xs.indices))
+    let source = try WorkbenchSource(displayName: "linear.csv", inputObservationCount: xs.count)
+    let configuration = ValidationConfiguration(
+        foldCount: 4, partitioning: .blocked,
+        specification: .init(degree: 1, spans: [0.75], robustIterations: 0,
+                             adaptiveContender: false)
+    )
+    let input = try WorkbenchInput(
+        loaded: loaded, source: source, sourceRows: xs.indices.map { $0 + 100 },
+        validationConfiguration: configuration
+    )
+    let output = try await ValidationWorkbenchTool().run(on: input)
+
+    #expect(output.id == "cross-validation")
+    #expect(output.metrics.first(where: { $0.id == "response-family" })?.text == "gaussian")
+    #expect(try #require(output.metrics.first(where: { $0.id == "primary-score" })?.value) < 1e-8)
+    #expect(output.table?.columns == ["source_row", "fold", "observed", "held_out_fit", "error"])
+    #expect(output.table?.rows.allSatisfy { $0.first.map { Int($0) != nil } ?? false } == true)
 }
 
 @Test func continuousAssessmentReportsFitAndResidualStructure() throws {

@@ -5,6 +5,7 @@
 // the public fitted-chart contract, so they can be used by the SwiftUI viewer,
 // a command-line host, or another application without importing UI types.
 
+import DataLens
 import Foundation
 
 /// Source identity that a workbench may retain or export.
@@ -36,8 +37,13 @@ public struct WorkbenchInput: Sendable {
     public let loaded: LoadedChart
     public let source: WorkbenchSource
     public let sourceRows: [Int]?
+    /// Reproducible statistical settings used for validation of this chart.
+    public let validationConfiguration: ValidationConfiguration
 
-    public init(loaded: LoadedChart, source: WorkbenchSource, sourceRows: [Int]? = nil) throws {
+    public init(
+        loaded: LoadedChart, source: WorkbenchSource, sourceRows: [Int]? = nil,
+        validationConfiguration: ValidationConfiguration = ValidationConfiguration()
+    ) throws {
         guard source.inputObservationCount >= loaded.model.rawX.count,
               sourceRows == nil || sourceRows?.count == loaded.model.rawX.count else {
             throw WorkbenchSessionError.invalidConfiguration
@@ -45,6 +51,7 @@ public struct WorkbenchInput: Sendable {
         self.loaded = loaded
         self.source = source
         self.sourceRows = sourceRows
+        self.validationConfiguration = validationConfiguration
     }
 }
 
@@ -193,7 +200,8 @@ public struct WorkbenchCatalog: Sendable {
     public static let builtIns: WorkbenchCatalog = {
         // These literal identifiers are statically known valid and unique.
         try! WorkbenchCatalog(tools: [
-            DescriptiveWorkbenchTool(), AssessmentWorkbenchTool(), ResidualReviewWorkbenchTool(),
+            DescriptiveWorkbenchTool(), AssessmentWorkbenchTool(), ValidationWorkbenchTool(),
+            ResidualReviewWorkbenchTool(),
         ])
     }()
 
@@ -264,6 +272,69 @@ public struct AssessmentWorkbenchTool: WorkbenchTool {
             : assessment.findings.map(\.message).joined(separator: " ")
         return try WorkbenchOutput(id: id, title: title, summary: summary, metrics: metrics)
     }
+}
+
+/// Built-in out-of-fold validation of the automatic statistical specification.
+///
+/// The held-out rows are never used for response-family routing or tuning: the
+/// validation engine refits the automatic model in every training fold.
+public struct ValidationWorkbenchTool: WorkbenchTool {
+    public let id = "cross-validation"
+    public let title = "Out-of-Fold Validation"
+    public let detail = "Family-aware held-out validation of the configured automatic fit."
+    public let maximumRows: Int
+
+    public init(maximumRows: Int = 10) {
+        self.maximumRows = max(1, maximumRows)
+    }
+
+    public func run(on input: WorkbenchInput) async throws -> WorkbenchOutput {
+        let model = input.loaded.model
+        guard let validation = CrossValidation.evaluate(
+            trainX: model.rawX.map { [$0] }, trainY: model.rawY,
+            configuration: input.validationConfiguration
+        ) else {
+            return try WorkbenchOutput(
+                id: id, title: title,
+                summary: "Validation could not produce finite held-out fits for this chart."
+            )
+        }
+        let primaryLabel: String
+        let primaryValue: Double
+        switch validation.responseFamily {
+        case .gaussian:
+            primaryLabel = "Out-of-fold RMSE"
+            primaryValue = validation.rootMeanSquaredError ?? .nan
+        case .binomial, .poisson:
+            primaryLabel = "Out-of-fold mean deviance"
+            primaryValue = validation.meanDeviance ?? .nan
+        }
+        let rows = validation.predictions
+            .sorted { abs($0.observed - $0.predicted) > abs($1.observed - $1.predicted) }
+            .prefix(maximumRows)
+            .map { prediction in
+                let sourceRow = input.sourceRows?[prediction.id] ?? prediction.id
+                return [
+                    String(sourceRow), String(prediction.fold + 1), format(prediction.observed),
+                    format(prediction.predicted), format(prediction.observed - prediction.predicted),
+                ]
+            }
+        let table = try WorkbenchTable(
+            columns: ["source_row", "fold", "observed", "held_out_fit", "error"], rows: rows
+        )
+        return try WorkbenchOutput(
+            id: id, title: title,
+            summary: "\(validation.configuration.foldCount)-fold \(validation.configuration.partitioning.rawValue) validation over \(validation.retainedObservationCount) retained observations.",
+            metrics: [
+                .init(id: "response-family", label: "Response family", text: validation.responseFamily.rawValue),
+                .init(id: "fold-count", label: "Folds", value: Double(validation.folds.count)),
+                .init(id: "primary-score", label: primaryLabel, value: primaryValue),
+            ],
+            table: table
+        )
+    }
+
+    private func format(_ value: Double) -> String { String(format: "%.8g", value) }
 }
 
 /// Built-in table of the largest finite residuals for quick follow-up.
@@ -370,7 +441,7 @@ public enum WorkbenchSessionError: Error, Sendable, Hashable, CustomStringConver
 /// A session records configuration, not source data. Loading it must therefore
 /// be followed by the host asking the user to select the intended input file.
 public struct WorkbenchSession: Codable, Sendable, Hashable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let source: WorkbenchSource
@@ -379,6 +450,8 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
     public let secondPredictor: String?
     public let smoother: String
     public let tuning: WorkbenchTuning
+    /// Fold assignment and automatic-model configuration for validation.
+    public let validationConfiguration: ValidationConfiguration
     public let activePlanesRawValue: Int
     public let enabledToolIDs: [String]
 
@@ -391,7 +464,8 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
     public init(
         source: WorkbenchSource, predictor: String, response: String,
         secondPredictor: String? = nil, smoother: SmootherChoice,
-        budget: TuningBudget, activePlanesRawValue: Int, enabledToolIDs: [String]
+        budget: TuningBudget, activePlanesRawValue: Int, enabledToolIDs: [String],
+        validationConfiguration: ValidationConfiguration? = nil
     ) throws {
         self.schemaVersion = Self.currentSchemaVersion
         self.source = source
@@ -400,6 +474,8 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
         self.secondPredictor = secondPredictor
         self.smoother = smoother.rawValue
         self.tuning = WorkbenchTuning(budget)
+        self.validationConfiguration = validationConfiguration
+            ?? Self.defaultValidationConfiguration(for: budget)
         self.activePlanesRawValue = activePlanesRawValue
         self.enabledToolIDs = enabledToolIDs
         try validate()
@@ -419,6 +495,7 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, source, predictor, response, secondPredictor, smoother, tuning
+        case validationConfiguration
         case activePlanesRawValue, enabledToolIDs
     }
 
@@ -431,13 +508,16 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
         secondPredictor = try values.decodeIfPresent(String.self, forKey: .secondPredictor)
         smoother = try values.decode(String.self, forKey: .smoother)
         tuning = try values.decode(WorkbenchTuning.self, forKey: .tuning)
+        validationConfiguration = try values.decodeIfPresent(
+            ValidationConfiguration.self, forKey: .validationConfiguration
+        ) ?? Self.defaultValidationConfiguration(for: tuning.tuningBudget)
         activePlanesRawValue = try values.decode(Int.self, forKey: .activePlanesRawValue)
         enabledToolIDs = try values.decode([String].self, forKey: .enabledToolIDs)
         try validate()
     }
 
     private func validate() throws {
-        guard schemaVersion == Self.currentSchemaVersion else {
+        guard schemaVersion == 1 || schemaVersion == Self.currentSchemaVersion else {
             throw WorkbenchSessionError.unsupportedSchema(schemaVersion)
         }
         guard !predictor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -451,5 +531,15 @@ public struct WorkbenchSession: Codable, Sendable, Hashable {
               Set(enabledToolIDs).count == enabledToolIDs.count else {
             throw WorkbenchSessionError.invalidConfiguration
         }
+    }
+
+    private static func defaultValidationConfiguration(for budget: TuningBudget) -> ValidationConfiguration {
+        ValidationConfiguration(
+            specification: StatisticalModelSpecification(
+                degree: budget.degree, spans: budget.spans,
+                robustIterations: budget.robustIterations,
+                adaptiveContender: budget.adaptiveContender
+            )
+        )
     }
 }

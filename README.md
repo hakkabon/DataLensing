@@ -46,7 +46,7 @@ chart view compiles only where SwiftUI/Charts exist
 
 ```bash
 swift build                        # all SPM targets
-swift test                         # 65 tests (see below)
+swift test                         # 66 tests (see below)
 swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
@@ -205,20 +205,27 @@ file-system, or parser state, so the same tool can be hosted by the viewer, a
 CLI, or a future automation.
 
 The built-in catalog contains descriptive statistics, family-aware model
-assessment, and a largest-residual review table. The viewer runs it explicitly
-from the **Workbench** sidebar section; fitting, chart scrolling, and surface
-rendering never run analysis panels implicitly. Refitting or replacing a chart
-cancels and clears stale results.
+assessment, out-of-fold validation, and a largest-residual review table. The
+validation tool refits Swift-DataLens’s automatic model separately in every
+training fold, using the same degree, span, robustness, and adaptive-tuning
+policy as the interactive chart. It reports Gaussian RMSE/MAE or
+binomial/Poisson mean deviance, plus the largest held-out errors joined back to
+source rows. The viewer runs it explicitly from the **Workbench** sidebar
+section; fitting, chart scrolling, and surface rendering never run analysis
+panels implicitly. Refitting or replacing a chart cancels and clears stale
+results.
 
-`WorkbenchSession` captures the selected columns, smoother, complete tuning
-budget, active planes, enabled tool identifiers, and a source display name +
-row count in schema-versioned JSON. It deliberately excludes absolute paths
-and source data. A host loading a session must ask for a source file, then can
-validate and replay the recorded configuration. **Copy Workbench Session** is
-available from the sidebar and `⌘⇧W` on macOS.
+`WorkbenchSession` schema v2 captures the selected columns, smoother,
+complete tuning budget, validation-fold configuration, active planes, enabled
+tool identifiers, and a source display name + row count in versioned JSON. It
+deliberately excludes absolute paths and source data. Schema-v1 sessions remain
+readable; their validation configuration is recovered from the recorded tuning
+budget. A host loading a session must ask for a source file, then can validate
+and replay the recorded configuration. **Copy Workbench Session** is available
+from the sidebar and `⌘⇧W` on macOS.
 
 Swift package resolution uses compatible tagged release ranges:
-DataLensing consumes Swift-DataLens `0.12.x`, which in turn resolves its
+DataLensing consumes Swift-DataLens `0.13.x`, which in turn resolves its
 compatible Swift-NumericCore release. The ecosystem compatibility workflow
 continues to exercise source-head integration separately from these stable
 consumer constraints.

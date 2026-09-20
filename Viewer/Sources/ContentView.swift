@@ -16,6 +16,7 @@
 //
 
 import DataLensing
+import DataLens
 import SwiftUI
 import UniformTypeIdentifiers
 #if canImport(AppKit)
@@ -691,7 +692,8 @@ struct ContentView: View {
                   source: source, predictor: built.controller.xName, response: built.controller.yName,
                   secondPredictor: selectedX2, smoother: built.controller.smoother,
                   budget: built.controller.budget, activePlanesRawValue: activePlanes.rawValue,
-                  enabledToolIDs: WorkbenchCatalog.builtIns.toolIDs
+                  enabledToolIDs: WorkbenchCatalog.builtIns.toolIDs,
+                  validationConfiguration: validationConfiguration(for: built)
               ),
               let data = try? session.jsonData(), let json = String(data: data, encoding: .utf8)
         else { return }
@@ -714,7 +716,8 @@ struct ContentView: View {
         guard let source = try? WorkbenchSource(
             displayName: built.fileName, inputObservationCount: built.controller.trainY.count
         ), let input = try? WorkbenchInput(
-            loaded: built.loaded, source: source, sourceRows: built.controller.keptFileIndices
+            loaded: built.loaded, source: source, sourceRows: built.controller.keptFileIndices,
+            validationConfiguration: validationConfiguration(for: built)
         ) else {
             workbenchError = "Could not prepare this chart for the workbench."
             return
@@ -745,6 +748,21 @@ struct ContentView: View {
         workbenchOutputs = []
         workbenchError = nil
         workbenchLoading = false
+    }
+
+    /// Reuse the visible chart's interactive fitting policy for held-out fits.
+    /// This keeps validation honest without silently escalating a user's
+    /// lightweight exploration into a much more expensive full tuning sweep.
+    private func validationConfiguration(for built: BuiltChart) -> ValidationConfiguration {
+        let budget = built.controller.budget
+        return ValidationConfiguration(
+            foldCount: 5, partitioning: .shuffled,
+            specification: StatisticalModelSpecification(
+                degree: budget.degree, spans: budget.spans,
+                robustIterations: budget.robustIterations,
+                adaptiveContender: budget.adaptiveContender
+            )
+        )
     }
 
     private func clearChart() {
