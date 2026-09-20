@@ -13,12 +13,11 @@ let package = Package(
         .executable(name: "data-lensing-app", targets: ["DataLensingApp"]),
     ],
     dependencies: [
-        // Swift-DataLens 0.13.x adds the unified fitted-model and
-        // deterministic cross-validation contract used by the workbench.
-        // Its NumericCore requirement remains semantically versioned, so this
-        // consumer stays on reproducible tagged releases rather than a commit.
+        // Swift-DataLens 0.15.x closes its NumericCore 0.6 / Rust 0.4
+        // release chain. Keep DataLensing on tagged compatible releases;
+        // source-head compatibility is covered separately in CI.
         .package(url: "https://github.com/hakkabon/Swift-DataLens.git",
-                 .upToNextMinor(from: "0.13.0")),
+                 .upToNextMinor(from: "0.15.0")),
     ],
     targets: [
         .target(

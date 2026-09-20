@@ -694,9 +694,12 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let input = try WorkbenchInput(loaded: loaded, source: source, sourceRows: [4, 8, 12])
 
     let outputs = try await WorkbenchCatalog.builtIns.runAll(on: input)
-    #expect(outputs.map(\.id) == ["descriptive-statistics", "model-assessment", "cross-validation", "residual-review"])
+    #expect(outputs.map(\.id) == [
+        "descriptive-statistics", "model-assessment", "cross-validation", "residual-review", "residual-profile",
+    ])
     #expect(outputs[0].metrics.first(where: { $0.id == "retained-observations" })?.value == 3)
     #expect(outputs[3].table?.rows.first == ["12", "2", "20", "5", "15", "15"])
+    #expect(outputs[4].table?.rows.count == 3)
 
     #expect(throws: WorkbenchError.duplicateToolIdentifier("descriptive-statistics")) {
         _ = try WorkbenchCatalog(tools: [DescriptiveWorkbenchTool(), DescriptiveWorkbenchTool()])
@@ -704,6 +707,30 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     await #expect(throws: WorkbenchError.unknownTool("missing")) {
         _ = try await WorkbenchCatalog.builtIns.run(id: "missing", on: input)
     }
+}
+
+@Test func residualProfileIsBoundedAndPreservesPredictorStructure() async throws {
+    let xs = (0 ..< 12).map(Double.init)
+    let residuals = xs.map { $0 < 6 ? -2.0 : 2.0 }
+    let model = ChartModel(
+        rawX: xs, rawY: Array(repeating: 0, count: xs.count), gridX: xs,
+        mean: Array(repeating: 0, count: xs.count), fittedAtTraining: Array(repeating: 0, count: xs.count),
+        residuals: residuals
+    )
+    let loaded = LoadedChart(model: model, summary: nil, smootherName: "Loess",
+                             xName: "time", yName: "value", keptIndices: Array(xs.indices))
+    let source = try WorkbenchSource(displayName: "step-residuals.csv", inputObservationCount: xs.count)
+    let output = try await ResidualProfileWorkbenchTool(maximumBins: 3).run(
+        on: WorkbenchInput(loaded: loaded, source: source)
+    )
+
+    #expect(output.id == "residual-profile")
+    #expect(output.summary == "3 equal-count predictor bins summarize 12 finite residuals.")
+    #expect(output.table?.columns == ["bin", "time_min", "time_max", "n", "mean_residual", "residual_rms"])
+    #expect(output.table?.rows.count == 3)
+    #expect(output.table?.rows.map { $0[3] } == ["4", "4", "4"])
+    #expect(output.table?.rows.map { $0[4] } == ["-2", "0", "2"])
+    #expect(output.metrics.first(where: { $0.id == "relative-structure" })?.value == 1)
 }
 
 @Test func workbenchSessionRoundTripsAndRejectsUnknownSchemas() throws {

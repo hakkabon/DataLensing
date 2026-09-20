@@ -323,7 +323,7 @@ struct ContentView: View {
                                     .font(.caption2.monospacedDigit())
                             }
                             if let table = output.table, let first = table.rows.first {
-                                Text("Largest: \(first.joined(separator: " · "))")
+                                Text("Preview: \(first.joined(separator: " · "))")
                                     .font(.caption2.monospaced())
                                     .lineLimit(1)
                                     .foregroundStyle(.secondary)

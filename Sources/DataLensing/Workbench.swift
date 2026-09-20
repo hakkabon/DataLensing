@@ -201,7 +201,7 @@ public struct WorkbenchCatalog: Sendable {
         // These literal identifiers are statically known valid and unique.
         try! WorkbenchCatalog(tools: [
             DescriptiveWorkbenchTool(), AssessmentWorkbenchTool(), ValidationWorkbenchTool(),
-            ResidualReviewWorkbenchTool(),
+            ResidualReviewWorkbenchTool(), ResidualProfileWorkbenchTool(),
         ])
     }()
 
@@ -376,6 +376,88 @@ public struct ResidualReviewWorkbenchTool: WorkbenchTool {
             id: id, title: title,
             summary: rows.isEmpty ? "No finite residuals are available." : "Top \(rows.count) finite residuals by absolute size.",
             metrics: [.init(id: "reviewed-residuals", label: "Reviewed residuals", value: Double(rows.count))],
+            table: table
+        )
+    }
+
+    private func format(_ value: Double) -> String { String(format: "%.8g", value) }
+}
+
+/// Predictor-ordered residual aggregation for detecting remaining structure
+/// without making a visual host materialize one row per observation.
+///
+/// The output is intentionally bounded by `maximumBins`, so the same tool is
+/// useful for a 30-row exploratory file and a 500k-row production file.
+/// It is descriptive: bin means identify where to investigate, but do not
+/// supply a hypothesis test or replace out-of-fold validation.
+public struct ResidualProfileWorkbenchTool: WorkbenchTool {
+    public let id = "residual-profile"
+    public let title = "Residual Profile"
+    public let detail = "Bounded predictor-ordered residual summaries for large-data structural review."
+    public let maximumBins: Int
+
+    public init(maximumBins: Int = 32) {
+        self.maximumBins = min(max(1, maximumBins), 200)
+    }
+
+    public func run(on input: WorkbenchInput) async throws -> WorkbenchOutput {
+        let model = input.loaded.model
+        var observations: [(x: Double, residual: Double)] = []
+        observations.reserveCapacity(model.rawX.count)
+        for index in model.rawX.indices {
+            guard model.residuals.indices.contains(index) else { continue }
+            let x = model.rawX[index]
+            let residual = model.residuals[index]
+            guard x.isFinite, residual.isFinite else { continue }
+            observations.append((x, residual))
+        }
+        guard !observations.isEmpty else {
+            return try WorkbenchOutput(
+                id: id, title: title,
+                summary: "No finite predictor/residual pairs are available for profiling."
+            )
+        }
+        try Task.checkCancellation()
+        observations.sort { $0.x < $1.x }
+        let binCount = min(maximumBins, observations.count)
+        let residualRMS = sqrt(observations.reduce(0.0) { $0 + $1.residual * $1.residual }
+            / Double(observations.count))
+        var largestAbsoluteMean = 0.0
+        var rows: [[String]] = []
+        rows.reserveCapacity(binCount)
+
+        for bin in 0 ..< binCount {
+            try Task.checkCancellation()
+            let lower = bin * observations.count / binCount
+            let upper = (bin + 1) * observations.count / binCount
+            let values = observations[lower ..< upper]
+            let meanResidual = values.reduce(0.0) { $0 + $1.residual } / Double(values.count)
+            let rms = sqrt(values.reduce(0.0) { $0 + $1.residual * $1.residual }
+                / Double(values.count))
+            largestAbsoluteMean = max(largestAbsoluteMean, abs(meanResidual))
+            rows.append([
+                String(bin + 1), format(values.first!.x), format(values.last!.x),
+                String(values.count), format(meanResidual), format(rms),
+            ])
+        }
+
+        let relativeSignal = residualRMS > 0 ? largestAbsoluteMean / residualRMS : 0
+        let table = try WorkbenchTable(
+            columns: [
+                "bin", "\(input.loaded.xName)_min", "\(input.loaded.xName)_max", "n",
+                "mean_\(model.residualKind == .raw ? "residual" : "pearson_residual")", "residual_rms",
+            ],
+            rows: rows
+        )
+        return try WorkbenchOutput(
+            id: id, title: title,
+            summary: "\(binCount) equal-count predictor bins summarize \(observations.count) finite residuals.",
+            metrics: [
+                .init(id: "profile-bins", label: "Profile bins", value: Double(binCount)),
+                .init(id: "profiled-observations", label: "Profiled observations", value: Double(observations.count)),
+                .init(id: "largest-bin-mean", label: "Largest |bin mean residual|", value: largestAbsoluteMean),
+                .init(id: "relative-structure", label: "Largest bin mean / residual RMS", value: relativeSignal),
+            ],
             table: table
         )
     }

@@ -75,6 +75,12 @@ public struct SmootherChartView: View {
     @State private var cachedKey: DecimationKey?
     @State private var decimationIndex: DecimationIndex?
 
+    /// Above this mark count, draw the already-decimated envelope in one
+    /// Canvas pass rather than creating a Swift Charts `PointMark` per point.
+    /// The curve, axes, selection, and accessibility semantics remain owned
+    /// by Charts; Canvas only carries the dense visual layer.
+    private static let canvasSampleThreshold = 256
+
     private struct DecimationKey: Hashable {
         let lower: Double?
         let upper: Double?
@@ -150,15 +156,20 @@ public struct SmootherChartView: View {
             .chartXSelection(value: $xSelection)
             .chartOverlay { proxy in
                 GeometryReader { geo in
-                    Color.clear
-                        .onChange(of: overlayKey(proxy: proxy, geo: geo)) { _, key in
-                            if key.width != plotWidth {
-                                plotWidth = key.width
-                            }
-                            if key.domain != visibleDomain {
-                                visibleDomain = key.domain
-                            }
+                    ZStack {
+                        if rendersSamplesOnCanvas(points: currentPoints) {
+                            denseSamplesCanvas(points: currentPoints, proxy: proxy, geo: geo)
                         }
+                        Color.clear
+                            .onChange(of: overlayKey(proxy: proxy, geo: geo)) { _, key in
+                                if key.width != plotWidth {
+                                    plotWidth = key.width
+                                }
+                                if key.domain != visibleDomain {
+                                    visibleDomain = key.domain
+                                }
+                            }
+                    }
                 }
             }
 
@@ -220,13 +231,23 @@ public struct SmootherChartView: View {
         Chart {
             // Plane 1: Raw Samples
             if planes.contains(.samples) {
-                ForEach(points.x.indices, id: \.self) { i in
-                    PointMark(
-                        x: .value("x", points.x[i]),
-                        y: .value("y", points.y[i])
-                    )
-                    .foregroundStyle(.secondary)
-                    .opacity(0.4)
+                if rendersSamplesOnCanvas(points: points) {
+                    // Keep data-domain anchors in Charts so the Canvas layer
+                    // cannot accidentally collapse the raw-data y extent.
+                    ForEach(sampleScaleAnchors(from: points).indices, id: \.self) { i in
+                        let anchor = sampleScaleAnchors(from: points)[i]
+                        PointMark(x: .value("x", anchor.x), y: .value("y", anchor.y))
+                            .foregroundStyle(.clear)
+                    }
+                } else {
+                    ForEach(points.x.indices, id: \.self) { i in
+                        PointMark(
+                            x: .value("x", points.x[i]),
+                            y: .value("y", points.y[i])
+                        )
+                        .foregroundStyle(.secondary)
+                        .opacity(0.4)
+                    }
                 }
             }
 
@@ -276,6 +297,43 @@ public struct SmootherChartView: View {
         }
         .chartYAxis { axisContent }
         .chartYAxisLabel(model.responseScale.rawValue)
+    }
+
+    private func rendersSamplesOnCanvas(points: (x: [Double], y: [Double])) -> Bool {
+        planes.contains(.samples) && points.x.count > Self.canvasSampleThreshold
+    }
+
+    private func sampleScaleAnchors(from points: (x: [Double], y: [Double])) -> [(x: Double, y: Double)] {
+        guard let minimum = points.y.enumerated().min(by: { $0.element < $1.element }),
+              let maximum = points.y.enumerated().max(by: { $0.element < $1.element }),
+              points.x.indices.contains(minimum.offset), points.x.indices.contains(maximum.offset)
+        else { return [] }
+        return [
+            (points.x[minimum.offset], minimum.element),
+            (points.x[maximum.offset], maximum.element),
+        ]
+    }
+
+    private func denseSamplesCanvas(
+        points: (x: [Double], y: [Double]), proxy: ChartProxy, geo: GeometryProxy
+    ) -> some View {
+        Canvas { context, _ in
+            guard let anchor = proxy.plotFrame else { return }
+            let frame = geo[anchor]
+            var dots = Path()
+            for index in points.x.indices where points.y.indices.contains(index) {
+                guard points.x[index].isFinite, points.y[index].isFinite,
+                      let x = proxy.position(forX: points.x[index]),
+                      let y = proxy.position(forY: points.y[index])
+                else { continue }
+                let center = CGPoint(x: x, y: y)
+                guard frame.insetBy(dx: -1, dy: -1).contains(center) else { continue }
+                dots.addEllipse(in: CGRect(x: x - 1, y: y - 1, width: 2, height: 2))
+            }
+            context.fill(dots, with: .color(.secondary.opacity(0.4)))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var gradientChart: some View {

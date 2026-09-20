@@ -140,9 +140,10 @@ planar layer separation (`ChartPlanes`: gridlines, samples, hull, curve,
 gradient, residuals, QQ), and `DecimationIndex`. The index is built once on a
 background task and uses a min/max segment tree, so a 500k-point viewport
 query touches at most the requested buckets × logarithmic lookups rather than
-rescanning 500k rows. It emits at most two Swift Charts marks per display
-pixel; probe interactions and scrolling never refit or re-sort data. The 2D
-grid uses SwiftUI Canvas to avoid thousands of Swift Charts mark nodes.
+rescanning 500k rows. Small envelopes remain accessible Swift Charts marks;
+larger envelopes use one SwiftUI Canvas pass while Charts retains the axes,
+curve, and probe interaction. Scrolling never refits or re-sorts data. The 2D
+grid also uses Canvas to avoid thousands of mark nodes.
 
 ## Versions
 
@@ -205,8 +206,12 @@ file-system, or parser state, so the same tool can be hosted by the viewer, a
 CLI, or a future automation.
 
 The built-in catalog contains descriptive statistics, family-aware model
-assessment, out-of-fold validation, and a largest-residual review table. The
-validation tool refits Swift-DataLens’s automatic model separately in every
+assessment, out-of-fold validation, a largest-residual review table, and a
+bounded **Residual Profile**. The profile sorts finite predictor/residual pairs
+only when explicitly run, then emits at most 32 equal-count bins with mean and
+RMS residuals. It makes remaining predictor-ordered structure inspectable on
+very large files without turning the workbench into another dense point view.
+The validation tool refits Swift-DataLens’s automatic model separately in every
 training fold, using the same degree, span, robustness, and adaptive-tuning
 policy as the interactive chart. It reports Gaussian RMSE/MAE or
 binomial/Poisson mean deviance, plus the largest held-out errors joined back to
@@ -225,7 +230,7 @@ and replay the recorded configuration. **Copy Workbench Session** is available
 from the sidebar and `⌘⇧W` on macOS.
 
 Swift package resolution uses compatible tagged release ranges:
-DataLensing consumes Swift-DataLens `0.13.x`, which in turn resolves its
+DataLensing consumes Swift-DataLens `0.15.x`, which in turn resolves its
 compatible Swift-NumericCore release. The ecosystem compatibility workflow
 continues to exercise source-head integration separately from these stable
 consumer constraints.
