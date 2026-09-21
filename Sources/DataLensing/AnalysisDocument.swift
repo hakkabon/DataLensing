@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let id: UUID
     public let schemaVersion: Int
@@ -210,10 +210,40 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A captioned statistical figure recorded by a host. The rendered pixels
+    /// intentionally do not live in the document: a host can redraw the figure
+    /// from its model recipe, while the annotation remains searchable and
+    /// reviewable in a small portable file.
+    public struct FigureAnnotation: Codable, Sendable, Hashable {
+        public enum Kind: String, Codable, Sendable, Hashable {
+            case fittedCurve
+            case residuals
+            case qqPlot
+            case gradient
+            case surface
+        }
+
+        public let kind: Kind
+        public let caption: String
+
+        public init(kind: Kind, caption: String) throws {
+            guard !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.kind = kind
+            self.caption = caption
+        }
+
+        fileprivate var isValid: Bool {
+            !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     public enum BlockPayload: Codable, Sendable, Hashable {
         case transformation(Transformation)
         case model(ModelRecipe)
         case evidence(EvidenceSnapshot)
+        case figure(FigureAnnotation)
         case note(String)
     }
 
@@ -269,6 +299,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             case .transformation(let transformation): return transformation.isValid
             case .model(let recipe): return recipe.isValid
             case .evidence(let evidence): return evidence.isValid
+            case .figure(let figure): return figure.isValid
             case .note(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         }
@@ -318,6 +349,39 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         return stale
     }
 
+    /// Mark a replayed block and every input it actually used as current.
+    ///
+    /// Hosts call this only after their explicit replay/fit operation has
+    /// completed successfully. It never revives descendants such as a prior
+    /// diagnostic snapshot, which keeps historical evidence honest.
+    @discardableResult
+    public mutating func markCurrent(
+        through targetBlockID: UUID, at date: Date = Date()
+    ) throws -> Set<UUID> {
+        guard blocks.contains(where: { $0.id == targetBlockID }) else {
+            throw AnalysisDocumentError.invalidDependency(targetBlockID)
+        }
+        var current: Set<UUID> = [targetBlockID]
+        for block in blocks.reversed() where current.contains(block.id) {
+            current.formUnion(block.upstreamBlockIDs)
+        }
+        for index in blocks.indices where current.contains(blocks[index].id) {
+            blocks[index].markCurrent(at: date)
+        }
+        updatedAt = date
+        try validate()
+        return current
+    }
+
+    /// The most recent model recipe, convenient for hosts offering one active
+    /// chart/document workbench at a time.
+    public var latestModelBlockID: UUID? {
+        blocks.last { block in
+            if case .model = block.payload { return true }
+            return false
+        }?.id
+    }
+
     /// Stable JSON intended for project files or clipboard/export transfer.
     public func jsonData() throws -> Data {
         let encoder = JSONEncoder()
@@ -337,15 +401,19 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
-        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        let decodedSchemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
         title = try values.decode(String.self, forKey: .title)
         source = try values.decode(Source.self, forKey: .source)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         blocks = try values.decode([Block].self, forKey: .blocks)
-        guard schemaVersion == Self.currentSchemaVersion else {
-            throw AnalysisDocumentError.unsupportedSchema(schemaVersion)
+        guard (1...Self.currentSchemaVersion).contains(decodedSchemaVersion) else {
+            throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
+        // Version 1 did not contain annotated figures. Its remaining block
+        // representation is unchanged, so normalize it on open and write the
+        // upgraded schema only when the host later saves the document.
+        schemaVersion = Self.currentSchemaVersion
         try validate()
     }
 
@@ -381,16 +449,23 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             }
             if case .evidence(let evidence) = block.payload {
                 guard evidence.sourceFingerprint == source.fingerprint,
-                      block.upstreamBlockIDs.contains(where: { id in
-                          blocks.first(where: { $0.id == id }).map { block in
-                              if case .model = block.payload { return true }
-                              return false
-                          } ?? false
-                      }) else {
+                      hasDirectModelDependency(block) else {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
             }
+            if case .figure = block.payload, !hasDirectModelDependency(block) {
+                throw AnalysisDocumentError.invalidDependency(block.id)
+            }
             preceding.insert(block.id)
+        }
+    }
+
+    private func hasDirectModelDependency(_ block: Block) -> Bool {
+        block.upstreamBlockIDs.contains { id in
+            blocks.first(where: { $0.id == id }).map { candidate in
+                if case .model = candidate.payload { return true }
+                return false
+            } ?? false
         }
     }
 }

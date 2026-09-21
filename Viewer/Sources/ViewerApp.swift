@@ -14,8 +14,12 @@ struct ViewerCommandActions {
     let export: () -> Void
     let exportReport: () -> Void
     let exportSession: () -> Void
+    let newDocument: () -> Void
+    let openDocument: () -> Void
+    let saveDocument: () -> Void
     let canClear: Bool
     let canExport: Bool
+    let canSaveDocument: Bool
 }
 
 private struct ViewerCommandActionsKey: FocusedValueKey {
@@ -54,6 +58,19 @@ private struct ViewerCommands: Commands {
             Button("Copy Workbench Session") { actions?.exportSession() }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
                 .disabled(actions?.canExport != true)
+
+            Divider()
+
+            Button("Create Analysis Document") { actions?.newDocument() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(actions?.canExport != true)
+
+            Button("Open Analysis Document…") { actions?.openDocument() }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+
+            Button("Save Analysis Document…") { actions?.saveDocument() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(actions?.canSaveDocument != true)
         }
     }
 }

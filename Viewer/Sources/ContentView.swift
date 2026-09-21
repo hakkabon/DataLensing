@@ -34,10 +34,40 @@ private struct BuiltChart: Sendable {
     let fileName: String
     let fileURL: URL
     let columns: [ColumnInfo]
+    /// Original CSV row per controller training row when replay transformed
+    /// the source. File-backed charts use the controller's native mapping.
+    let sourceRows: [Int]?
 
     /// Numeric column names for the pickers, in file order.
     var numericNames: [String] {
         columns.filter(\.isNumeric).map(\.name)
+    }
+
+    var keptSourceRows: [Int]? {
+        guard let sourceRows else { return controller.keptFileIndices }
+        guard sourceRows.count == controller.trainX.count else { return nil }
+        return loaded.keptIndices.map { sourceRows[controller.windowBase[$0]] }
+    }
+}
+
+/// A small FileDocument wrapper keeps persistence in the platform file picker
+/// while `AnalysisDocument` stays a portable Codable statistical record.
+private struct AnalysisDocumentFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    var data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration _: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 
@@ -78,6 +108,18 @@ struct ContentView: View {
     @State private var workbenchLoading = false
     @State private var workbenchError: String?
 
+    @State private var analysisDocument: AnalysisDocument?
+    @State private var documentURL: URL?
+    @State private var documentSourceURL: URL?
+    @State private var documentTask: Task<Void, Never>?
+    @State private var documentRecomputing = false
+    @State private var documentError: String?
+    @State private var showingDocumentImporter = false
+    @State private var showingDocumentSourceImporter = false
+    @State private var showingDocumentExporter = false
+    @State private var documentExport: AnalysisDocumentFile?
+    @State private var figureCaption = ""
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebarContent
@@ -99,6 +141,37 @@ struct ContentView: View {
                 phase = .failed(String(describing: error))
             }
         }
+        .fileImporter(
+            isPresented: $showingDocumentImporter,
+            allowedContentTypes: [.json], allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                openDocument(url)
+            case .failure(let error):
+                documentError = String(describing: error)
+            }
+        }
+        .fileImporter(
+            isPresented: $showingDocumentSourceImporter,
+            allowedContentTypes: [.commaSeparatedText], allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                recomputeDocument(from: url)
+            case .failure(let error):
+                documentError = String(describing: error)
+            }
+        }
+        .fileExporter(
+            isPresented: $showingDocumentExporter, document: documentExport,
+            contentType: .json, defaultFilename: documentDefaultFileName
+        ) { result in
+            if case .success(let url) = result { documentURL = url }
+            if case .failure(let error) = result { documentError = String(describing: error) }
+        }
         // ─── Keyboard Shortcuts ───────────────────────────────────────
         .onKeyPress(.leftArrow) {
             stepProbe(by: -1)
@@ -118,8 +191,12 @@ struct ContentView: View {
             export: exportFittedGrid,
             exportReport: exportAnalysisReport,
             exportSession: exportWorkbenchSession,
+            newDocument: createDocumentFromChart,
+            openDocument: { showingDocumentImporter = true },
+            saveDocument: saveDocument,
             canClear: isReady,
-            canExport: isReady
+            canExport: isReady,
+            canSaveDocument: analysisDocument != nil
         ))
     }
 
@@ -153,6 +230,74 @@ struct ContentView: View {
                         Button("Cancel") { cancelWork() }
                             .controlSize(.small)
                     }
+                }
+            }
+
+            Section("Analysis Document") {
+                if let document = analysisDocument {
+                    HStack(spacing: 6) {
+                        Image(systemName: "book.closed")
+                            .foregroundStyle(Color.accentColor)
+                        Text(document.title).font(.caption.bold()).lineLimit(1)
+                        Spacer()
+                        documentStateBadge(for: document)
+                    }
+                    Text("Source: \(document.source.displayName) · \(document.blocks.count) blocks")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if let documentError {
+                        Label(documentError, systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button {
+                        if let documentSourceURL {
+                            recomputeDocument(from: documentSourceURL)
+                        } else {
+                            showingDocumentSourceImporter = true
+                        }
+                    } label: {
+                        if documentRecomputing {
+                            Label("Recomputing…", systemImage: "arrow.triangle.2.circlepath")
+                        } else if documentSourceURL == nil {
+                            Label("Attach CSV & Recompute…", systemImage: "link.badge.plus")
+                        } else {
+                            Label("Recompute Document", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(documentRecomputing || document.latestModelBlockID == nil)
+
+                    if case .ready(let built) = phase {
+                        Button("Update Recipe from Visible Chart") {
+                            updateDocumentRecipe(from: built)
+                        }
+                        .disabled(documentRecomputing || documentSourceURL != built.fileURL)
+
+                        TextField("Figure caption", text: $figureCaption, prompt: Text("What does this figure show?"))
+                            .font(.caption)
+                        Button("Record Figure Annotation") {
+                            appendFigureAnnotation(from: built)
+                        }
+                        .disabled(documentRecomputing || document.latestModelBlockID == nil)
+                    }
+
+                    Button("Save Document…") { saveDocument() }
+                        .disabled(documentRecomputing)
+                    Button("Open Different Document…") { showingDocumentImporter = true }
+
+                    ForEach(document.blocks) { block in
+                        documentBlockRow(block)
+                    }
+                } else {
+                    Text("Save models, figures, and validation evidence as a replayable statistical record.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if case .ready = phase {
+                        Button("Create Document from Chart") { createDocumentFromChart() }
+                    }
+                    Button("Open Document…") { showingDocumentImporter = true }
                 }
             }
 
@@ -605,6 +750,266 @@ struct ContentView: View {
         }
     }
 
+    private var documentDefaultFileName: String {
+        let title = analysisDocument?.title ?? "analysis"
+        let safe = title.replacingOccurrences(of: "/", with: "-")
+        return safe.isEmpty ? "analysis" : safe
+    }
+
+    @ViewBuilder
+    private func documentStateBadge(for document: AnalysisDocument) -> some View {
+        let stale = document.blocks.filter { $0.state == .stale }.count
+        Label(
+            stale == 0 ? "Current" : "\(stale) stale",
+            systemImage: stale == 0 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+        )
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(stale == 0 ? .green : .orange)
+    }
+
+    @ViewBuilder
+    private func documentBlockRow(_ block: AnalysisDocument.Block) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: documentBlockSymbol(block))
+                .foregroundStyle(block.state == .current ? Color.accentColor : .orange)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(block.title).font(.caption).lineLimit(1)
+                Text(documentBlockDetail(block))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 4)
+            Text(block.state == .current ? "Current" : "Stale")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(block.state == .current ? .green : .orange)
+        }
+    }
+
+    private func documentBlockSymbol(_ block: AnalysisDocument.Block) -> String {
+        switch block.payload {
+        case .transformation: "line.3.horizontal.decrease.circle"
+        case .model: "function"
+        case .evidence: "checklist"
+        case .figure: "chart.xyaxis.line"
+        case .note: "note.text"
+        }
+    }
+
+    private func documentBlockDetail(_ block: AnalysisDocument.Block) -> String {
+        switch block.payload {
+        case .transformation: return "Replayable transformation"
+        case .model(let recipe): return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response)"
+        case .evidence(let evidence):
+            return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"
+        case .figure(let figure): return figure.caption
+        case .note(let text): return text
+        }
+    }
+
+    private func currentDocumentRecipe(for built: BuiltChart) throws -> AnalysisDocument.ModelRecipe {
+        guard selectedX2 == nil else {
+            throw AnalysisDocumentExecutionError.multivariateModelUnsupported
+        }
+        return try AnalysisDocument.ModelRecipe(
+            predictor: built.controller.xName, response: built.controller.yName,
+            smoother: built.controller.smoother, tuning: WorkbenchTuning(built.controller.budget),
+            validationConfiguration: validationConfiguration(for: built)
+        )
+    }
+
+    private func figureAnnotation(for built: BuiltChart) throws -> AnalysisDocument.FigureAnnotation {
+        let kind: AnalysisDocument.FigureAnnotation.Kind
+        if activePlanes.contains(.qqPlot) { kind = .qqPlot }
+        else if activePlanes.contains(.residuals) { kind = .residuals }
+        else if activePlanes.contains(.gradient) { kind = .gradient }
+        else { kind = .fittedCurve }
+        let caption = figureCaption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try AnalysisDocument.FigureAnnotation(
+            kind: kind,
+            caption: caption.isEmpty
+                ? "\(kind.rawValue): \(built.controller.yName) by \(built.controller.xName)."
+                : caption
+        )
+    }
+
+    private func createDocumentFromChart() {
+        guard case .ready(let built) = phase else { return }
+        documentTask?.cancel()
+        documentError = nil
+        documentRecomputing = true
+        do {
+            let recipe = try currentDocumentRecipe(for: built)
+            let figure = try figureAnnotation(for: built)
+            let title = URL(fileURLWithPath: built.fileName).deletingPathExtension().lastPathComponent
+                + " — \(built.controller.yName) by \(built.controller.xName)"
+            documentTask = Task {
+                do {
+                    let document = try await Task.detached(priority: .userInitiated) {
+                        try AnalysisDocumentExecutor.createDocument(
+                            title: title, sourceURL: built.fileURL, loaded: built.loaded,
+                            sourceRows: built.keptSourceRows, model: recipe, figure: figure
+                        )
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    analysisDocument = document
+                    documentURL = nil
+                    documentSourceURL = built.fileURL
+                    figureCaption = ""
+                    documentRecomputing = false
+                } catch is CancellationError {
+                    guard !Task.isCancelled else { return }
+                    documentRecomputing = false
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    documentError = String(describing: error)
+                    documentRecomputing = false
+                }
+            }
+        } catch {
+            documentError = String(describing: error)
+            documentRecomputing = false
+        }
+    }
+
+    private func openDocument(_ url: URL) {
+        documentTask?.cancel()
+        documentError = nil
+        documentRecomputing = true
+        documentTask = Task {
+            do {
+                let document = try await Task.detached(priority: .userInitiated) {
+                    let didAccess = url.startAccessingSecurityScopedResource()
+                    defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+                    return try AnalysisDocument(jsonData: Data(contentsOf: url))
+                }.value
+                guard !Task.isCancelled else { return }
+                analysisDocument = document
+                documentURL = url
+                // A document never persists an absolute source path. Make
+                // attachment an explicit user decision even if another chart
+                // happens to be visible in this window.
+                documentSourceURL = nil
+                figureCaption = ""
+                documentRecomputing = false
+            } catch is CancellationError {
+                guard !Task.isCancelled else { return }
+                documentRecomputing = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                documentError = String(describing: error)
+                documentRecomputing = false
+            }
+        }
+    }
+
+    private func saveDocument() {
+        guard let analysisDocument else { return }
+        do {
+            documentExport = AnalysisDocumentFile(data: try analysisDocument.jsonData())
+            showingDocumentExporter = true
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func updateDocumentRecipe(from built: BuiltChart) {
+        guard var document = analysisDocument, let modelID = document.latestModelBlockID else { return }
+        do {
+            let stale = try document.update(blockID: modelID, payload: .model(currentDocumentRecipe(for: built)))
+            analysisDocument = document
+            documentSourceURL = built.fileURL
+            documentError = stale.isEmpty ? nil : "Model recipe changed; dependent figures and evidence are stale."
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func appendFigureAnnotation(from built: BuiltChart) {
+        guard var document = analysisDocument, let modelID = document.latestModelBlockID else { return }
+        do {
+            let annotation = try figureAnnotation(for: built)
+            let block = try AnalysisDocument.Block(
+                title: "Figure: \(annotation.kind.rawValue)", upstreamBlockIDs: [modelID],
+                payload: .figure(annotation)
+            )
+            try document.append(block)
+            analysisDocument = document
+            figureCaption = ""
+            documentError = nil
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func recomputeDocument(from sourceURL: URL) {
+        guard let document = analysisDocument, let modelID = document.latestModelBlockID else { return }
+        documentTask?.cancel()
+        documentError = nil
+        documentRecomputing = true
+        let figureKind = figureKindForCurrentPlanes()
+        documentTask = Task {
+            do {
+                let result = try await scopedDocumentRecompute(
+                    document: document, sourceURL: sourceURL, modelBlockID: modelID
+                )
+                guard !Task.isCancelled else { return }
+                var updated = document
+                _ = try updated.markCurrent(through: modelID)
+                let figure = try AnalysisDocument.FigureAnnotation(
+                    kind: figureKind,
+                    caption: "Recomputed \(figureKind.rawValue): \(result.fit.loaded.yName) by \(result.fit.loaded.xName)."
+                )
+                let figureBlock = try AnalysisDocument.Block(
+                    title: "Recomputed figure", upstreamBlockIDs: [modelID], payload: .figure(figure)
+                )
+                try updated.append(figureBlock)
+                let evidence = try AnalysisDocumentExecutor.evidenceSnapshot(
+                    document: updated, fit: result.fit, sourceURL: sourceURL,
+                    workbenchOutputs: result.outputs
+                )
+                let evidenceBlock = try AnalysisDocument.Block(
+                    title: "Recomputed validation evidence", upstreamBlockIDs: [modelID],
+                    payload: .evidence(evidence)
+                )
+                try updated.append(evidenceBlock)
+                guard !Task.isCancelled else { return }
+                let built = BuiltChart(
+                    controller: result.fit.controller, loaded: result.fit.loaded,
+                    fileName: sourceURL.lastPathComponent, fileURL: sourceURL,
+                    columns: result.fit.columns, sourceRows: result.fit.trainingSourceRows
+                )
+                analysisDocument = updated
+                documentSourceURL = sourceURL
+                selectedX = built.controller.xName
+                selectedY = built.controller.yName
+                selectedX2 = nil
+                selectedSmoother = built.controller.smoother
+                visibleDomain = nil
+                inspectorX = nil
+                loadedSurface = nil
+                workbenchOutputs = result.outputs
+                phase = .ready(built)
+                documentRecomputing = false
+            } catch is CancellationError {
+                guard !Task.isCancelled else { return }
+                documentRecomputing = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                documentError = String(describing: error)
+                documentRecomputing = false
+            }
+        }
+    }
+
+    private func figureKindForCurrentPlanes() -> AnalysisDocument.FigureAnnotation.Kind {
+        if activePlanes.contains(.qqPlot) { return .qqPlot }
+        if activePlanes.contains(.residuals) { return .residuals }
+        if activePlanes.contains(.gradient) { return .gradient }
+        return .fittedCurve
+    }
+
     /// Live windowed-policy readout: what the chart reports visible,
     /// whether the cached fit still covers it.
     private func coverageLine(for built: BuiltChart) -> String {
@@ -667,7 +1072,7 @@ struct ContentView: View {
         let report = AnalysisReport.make(
             from: built.loaded, sourceURL: built.fileURL,
             inputObservationCount: built.controller.trainY.count,
-            sourceRows: built.controller.keptFileIndices
+            sourceRows: built.keptSourceRows
         )
         guard let data = try? report.jsonData(),
               let json = String(data: data, encoding: .utf8) else { return }
@@ -716,7 +1121,7 @@ struct ContentView: View {
         guard let source = try? WorkbenchSource(
             displayName: built.fileName, inputObservationCount: built.controller.trainY.count
         ), let input = try? WorkbenchInput(
-            loaded: built.loaded, source: source, sourceRows: built.controller.keptFileIndices,
+            loaded: built.loaded, source: source, sourceRows: built.keptSourceRows,
             validationConfiguration: validationConfiguration(for: built)
         ) else {
             workbenchError = "Could not prepare this chart for the workbench."
@@ -962,7 +1367,8 @@ struct ContentView: View {
                 inspectorX = nil
                 phase = .ready(BuiltChart(
                     controller: result.controller, loaded: loaded,
-                    fileName: built.fileName, fileURL: built.fileURL, columns: built.columns
+                    fileName: built.fileName, fileURL: built.fileURL, columns: built.columns,
+                    sourceRows: built.sourceRows
                 ))
             } catch is CancellationError {
                 guard gate.isCurrent(generation) else { return }
@@ -999,7 +1405,7 @@ private func scopedLoad(from url: URL, smoother: SmootherChoice = .automatic) as
     try Task.checkCancellation()
     return BuiltChart(
         controller: controller, loaded: loaded,
-        fileName: url.lastPathComponent, fileURL: url, columns: columns
+        fileName: url.lastPathComponent, fileURL: url, columns: columns, sourceRows: nil
     )
 }
 
@@ -1022,7 +1428,7 @@ private func scopedFit(
     try Task.checkCancellation()
     return BuiltChart(
         controller: controller, loaded: loaded,
-        fileName: url.lastPathComponent, fileURL: url, columns: columns
+        fileName: url.lastPathComponent, fileURL: url, columns: columns, sourceRows: nil
     )
 }
 
@@ -1037,4 +1443,28 @@ private func scopedSurface(
         from: url, xColumn: x, yColumn: y, responseColumn: response,
         budget: .interactive
     )
+}
+
+private struct DocumentRecomputeResult: Sendable {
+    let fit: AnalysisDocumentFit
+    let outputs: [WorkbenchOutput]
+}
+
+/// Keep the security-scoped resource alive across the complete replay, fit,
+/// and validation run selected from the document workbench.
+private func scopedDocumentRecompute(
+    document: AnalysisDocument, sourceURL: URL, modelBlockID: UUID
+) async throws -> DocumentRecomputeResult {
+    let didAccess = sourceURL.startAccessingSecurityScopedResource()
+    defer {
+        if didAccess { sourceURL.stopAccessingSecurityScopedResource() }
+    }
+    let fit = try await AnalysisDocumentExecutor.fit(
+        document: document, sourceURL: sourceURL, modelBlockID: modelBlockID
+    )
+    try Task.checkCancellation()
+    let input = try AnalysisDocumentExecutor.workbenchInput(document: document, fit: fit)
+    let outputs = try await WorkbenchCatalog.builtIns.runAll(on: input)
+    try Task.checkCancellation()
+    return DocumentRecomputeResult(fit: fit, outputs: outputs)
 }

@@ -823,10 +823,15 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(document.blocks[2].state == .stale)
 
     let json = try #require(String(data: document.jsonData(), encoding: .utf8))
-    #expect(json.contains("\"schemaVersion\" : 1"))
+    #expect(json.contains("\"schemaVersion\" : \(AnalysisDocument.currentSchemaVersion)"))
     #expect(json.contains(source.displayName))
     #expect(!json.contains(url.path))
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+
+    var legacyObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
+    legacyObject["schemaVersion"] = 1
+    let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+    #expect(try AnalysisDocument(jsonData: legacyData).schemaVersion == AnalysisDocument.currentSchemaVersion)
 
     var futureObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
     futureObject["schemaVersion"] = 99
@@ -945,6 +950,87 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(throws: AnalysisTransformationError.sourceChanged) {
         _ = try AnalysisTransformationExecutor.replay(document: document, sourceURL: url, through: model.id)
     }
+}
+
+@Test func documentFiguresRequireModelsAndExplicitReplayDoesNotReviveOldEvidence() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,3\n2,5\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let transform = try AnalysisDocument.Block(
+        title: "Complete cases", payload: .transformation(.dropMissing(columns: ["x", "y"]))
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Trend", upstreamBlockIDs: [transform.id], payload: .model(
+            try AnalysisDocument.ModelRecipe(
+                predictor: "x", response: "y", smoother: .loess,
+                tuning: WorkbenchTuning(.interactive), validationConfiguration: ValidationConfiguration()
+            )
+        )
+    )
+    let figure = try AnalysisDocument.Block(
+        title: "Fitted trend", upstreamBlockIDs: [model.id], payload: .figure(
+            try AnalysisDocument.FigureAnnotation(kind: .fittedCurve, caption: "A smooth increasing trend.")
+        )
+    )
+    let loaded = LoadedChart(
+        model: ChartModel(rawX: [0, 1, 2], rawY: [1, 3, 5], gridX: [0, 1, 2], mean: [1, 3, 5]),
+        summary: nil, smootherName: "Loess", xName: "x", yName: "y", keptIndices: [0, 1, 2]
+    )
+    let evidence = try AnalysisDocument.Block(
+        title: "Initial evidence", upstreamBlockIDs: [model.id], payload: .evidence(
+            try AnalysisDocument.EvidenceSnapshot(
+                sourceFingerprint: source.fingerprint,
+                report: AnalysisReport.make(from: loaded, sourceURL: url, inputObservationCount: 3),
+                workbenchOutputs: []
+            )
+        )
+    )
+    var document = try AnalysisDocument(
+        title: "Document", source: source, blocks: [transform, model, figure, evidence]
+    )
+
+    _ = try document.update(
+        blockID: transform.id,
+        payload: .transformation(.filterNumeric(column: "x", comparison: .greaterThanOrEqual, value: 0))
+    )
+    #expect(document.blocks.map(\.state) == [.current, .stale, .stale, .stale])
+    let refreshed = try document.markCurrent(through: model.id)
+    #expect(refreshed == Set([transform.id, model.id]))
+    #expect(document.blocks.map(\.state) == [.current, .current, .stale, .stale])
+
+    let orphanFigure = try AnalysisDocument.Block(
+        title: "Orphan figure", payload: .figure(
+            try AnalysisDocument.FigureAnnotation(kind: .residuals, caption: "No model.")
+        )
+    )
+    #expect(throws: AnalysisDocumentError.invalidDependency(orphanFigure.id)) {
+        _ = try AnalysisDocument(title: "Invalid", source: source, blocks: [orphanFigure])
+    }
+}
+
+@Test func documentExecutorFitsReplayAndPreservesOriginalRows() async throws {
+    let url = try scratchCSV("x,y\n0,1\n1,NA\n2,5\n3,7\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let transform = try AnalysisDocument.Block(
+        title: "Complete cases", payload: .transformation(.dropMissing(columns: ["x", "y"]))
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Trend", upstreamBlockIDs: [transform.id], payload: .model(
+            try AnalysisDocument.ModelRecipe(
+                predictor: "x", response: "y", smoother: .loess,
+                tuning: WorkbenchTuning(.interactive), validationConfiguration: ValidationConfiguration()
+            )
+        )
+    )
+    let document = try AnalysisDocument(title: "Replay", source: source, blocks: [transform, model])
+    let fit = try await AnalysisDocumentExecutor.fit(
+        document: document, sourceURL: url, modelBlockID: model.id
+    )
+    #expect(fit.loaded.model.rawX == [0, 2, 3])
+    #expect(fit.sourceRows == [0, 2, 3])
+    #expect(fit.transformedObservationCount == 3)
+    #expect(try AnalysisDocumentExecutor.workbenchInput(document: document, fit: fit).sourceRows == [0, 2, 3])
 }
 
 @Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {
