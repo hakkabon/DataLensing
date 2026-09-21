@@ -497,7 +497,8 @@ public struct WorkbenchTuning: Codable, Sendable, Hashable {
         )
     }
 
-    fileprivate var isValid: Bool {
+    /// Shared validation rule for every persisted owner of a tuning budget.
+    var isValid: Bool {
         (0...2).contains(degree)
             && (spans == nil || (!(spans?.isEmpty ?? true) && spans!.allSatisfy { $0.isFinite && $0 > 0 }))
             && robustIterations >= 0 && gridCount > 0

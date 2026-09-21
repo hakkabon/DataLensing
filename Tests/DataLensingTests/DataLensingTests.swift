@@ -769,6 +769,115 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     }
 }
 
+@Test func analysisDocumentPreservesEvidenceAndMarksDependentBlocksStale() throws {
+    let url = try scratchCSV("time,value\n0,1\n1,3\n2,5\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let table = try CSVTable.load(contentsOf: url)
+    let source = try AnalysisDocument.Source.make(from: url, table: table)
+    let workbenchSource = try WorkbenchSource(
+        displayName: source.displayName, inputObservationCount: source.inputObservationCount
+    )
+    let session = try WorkbenchSession(
+        source: workbenchSource, predictor: "time", response: "value", smoother: .loess,
+        budget: .interactive, activePlanesRawValue: 0, enabledToolIDs: WorkbenchCatalog.builtIns.toolIDs
+    )
+    let recipe = try AnalysisDocument.ModelRecipe(session: session)
+    let loaded = LoadedChart(
+        model: ChartModel(
+            rawX: [0, 1, 2], rawY: [1, 3, 5], gridX: [0, 1, 2], mean: [1, 3, 5],
+            fittedAtTraining: [1, 3, 5], residuals: [0, 0, 0]
+        ), summary: nil, smootherName: "Loess", xName: "time", yName: "value", keptIndices: [0, 1, 2]
+    )
+    let report = AnalysisReport.make(from: loaded, sourceURL: url, inputObservationCount: 3)
+    let evidence = try AnalysisDocument.EvidenceSnapshot(
+        capturedAt: Date(timeIntervalSince1970: 1_700_000_000), sourceFingerprint: source.fingerprint,
+        report: report,
+        workbenchOutputs: [try WorkbenchOutput(
+            id: "model-assessment", title: "Model Assessment", summary: "No configured thresholds were exceeded."
+        )]
+    )
+    let transformation = try AnalysisDocument.Block(
+        title: "Remove incomplete observations",
+        payload: .transformation(.dropMissing(columns: ["time", "value"]))
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Loess trend", upstreamBlockIDs: [transformation.id], payload: .model(recipe)
+    )
+    let evidenceBlock = try AnalysisDocument.Block(
+        title: "Fit and validation evidence", upstreamBlockIDs: [model.id], payload: .evidence(evidence)
+    )
+    var document = try AnalysisDocument(
+        title: "Trend analysis", source: source, blocks: [transformation, model, evidenceBlock],
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+
+    let stale = try document.update(
+        blockID: transformation.id,
+        payload: .transformation(.filterNumeric(column: "time", comparison: .greaterThanOrEqual, value: 0)),
+        at: Date(timeIntervalSince1970: 1_700_000_100)
+    )
+    #expect(stale == Set([model.id, evidenceBlock.id]))
+    #expect(document.blocks[0].state == .current)
+    #expect(document.blocks[1].state == .stale)
+    #expect(document.blocks[2].state == .stale)
+
+    let json = try #require(String(data: document.jsonData(), encoding: .utf8))
+    #expect(json.contains("\"schemaVersion\" : 1"))
+    #expect(json.contains(source.displayName))
+    #expect(!json.contains(url.path))
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+
+    var futureObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
+    futureObject["schemaVersion"] = 99
+    let futureData = try JSONSerialization.data(withJSONObject: futureObject)
+    #expect(throws: AnalysisDocumentError.unsupportedSchema(99)) {
+        _ = try AnalysisDocument(jsonData: futureData)
+    }
+}
+
+@Test func analysisDocumentFingerprintsSourceAndRejectsInvalidEvidenceGraphs() throws {
+    let firstURL = try scratchCSV("x,y\n0,1\n1,2\n")
+    let secondURL = try scratchCSV("x,y\n0,1\n1,20\n")
+    defer {
+        try? FileManager.default.removeItem(at: firstURL)
+        try? FileManager.default.removeItem(at: secondURL)
+    }
+    let first = try AnalysisDocument.Source.make(from: firstURL, table: CSVTable.load(contentsOf: firstURL))
+    let second = try AnalysisDocument.Source.make(from: secondURL, table: CSVTable.load(contentsOf: secondURL))
+    #expect(first.fingerprint != second.fingerprint)
+
+    let orphan = try AnalysisDocument.Block(
+        title: "Cannot depend on an absent block", upstreamBlockIDs: [UUID()], payload: .note("Review import.")
+    )
+    #expect(throws: AnalysisDocumentError.invalidDependency(orphan.id)) {
+        _ = try AnalysisDocument(title: "Invalid graph", source: first, blocks: [orphan])
+    }
+
+    let model = try AnalysisDocument.Block(
+        title: "Model", payload: .model(try AnalysisDocument.ModelRecipe(
+            predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+            validationConfiguration: ValidationConfiguration()
+        ))
+    )
+    let report = AnalysisReport.make(
+        from: LoadedChart(
+            model: ChartModel(rawX: [0, 1], rawY: [1, 2], gridX: [0, 1], mean: [1, 2]),
+            summary: nil, smootherName: "Loess", xName: "x", yName: "y", keptIndices: [0, 1]
+        ), sourceURL: firstURL, inputObservationCount: 2
+    )
+    let mismatchedEvidence = try AnalysisDocument.Block(
+        title: "Mismatched evidence", upstreamBlockIDs: [model.id], payload: .evidence(
+            try AnalysisDocument.EvidenceSnapshot(
+                sourceFingerprint: second.fingerprint, report: report, workbenchOutputs: []
+            )
+        )
+    )
+    #expect(throws: AnalysisDocumentError.invalidEvidence(mismatchedEvidence.id)) {
+        _ = try AnalysisDocument(title: "Invalid evidence", source: first, blocks: [model, mismatchedEvidence])
+    }
+}
+
 @Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {
     let xs = (0..<20).map { Double($0) / 5 }
     let ys = xs.map { 1.5 * $0 + 0.25 }

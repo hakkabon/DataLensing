@@ -21,7 +21,7 @@ Package.swift                  # DataTables + DataLensing + CLI; semantic Swift-
 Sources/DataTables/            # Local data-in: streaming CSV, type inference, [[Double]] extraction
 Sources/DataLensing/           # App-support lib: ChartModel, FitController, budgets, smoother
                                # choice, decimation, generation gate, chart view + window policy
-                               # plus portable workbench tools and replayable sessions
+                               # plus portable workbench tools, replayable sessions, and analysis documents
 Sources/DataLensingApp/        # CLI: bundled samples → fit → terminal report (dogfoods loadChart)
 Sources/DataLensingApp/SampleData/  # deterministic 1D and 2D examples
 Tests/DataTablesTests/         # Parser, inference, errors, chunk-size independence, 100k streaming
@@ -172,6 +172,33 @@ schema-versioned provenance sidecar with source metadata, model/tuning choices,
 retained-row join keys, fitted values, and residuals. Reports export as stable
 JSON and observation-level CSV; non-finite diagnostics become explicit nulls
 rather than invalid JSON numbers.
+
+## Analysis documents — lab-notebook foundation
+
+`AnalysisDocument` is the first persistence layer for a native numerical-
+statistics lab notebook. It is a structured dependency graph, not an
+arbitrary-code notebook: a project records a privacy-preserving source identity
+(schema, row count, streaming content fingerprint, never an absolute path),
+declarative transformations, a serializable model recipe, frozen report and
+workbench evidence, and user notes.
+
+Editing a source, transformation, or model marks all downstream blocks
+**stale**; it never silently refits or overwrites evidence. A fresh fit or
+validation run must create a new evidence snapshot. Documents use strict
+versioned decoding, reject dangling dependencies and mismatched source
+fingerprints, and round-trip as stable pretty JSON. The initial transformation
+vocabulary records column selection, missing-value policy, numeric filters,
+and log-derived columns. Execution and UI editing are deliberately next steps,
+so saved intent never masquerades as an already-applied transformation.
+
+The notebook roadmap is:
+
+1. Connect the current viewer's import, model, report, and workbench results
+   to document creation/open/save.
+2. Implement a replayable transformation executor and show stale/current state
+   in the workbench.
+3. Add document navigation, annotated figures, and deliberate recomputation
+   controls on macOS and iPadOS.
 
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
