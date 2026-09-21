@@ -1,13 +1,18 @@
 # CI: SPM build + tests everywhere the package claims to run, plus the
 # Xcode viewer where Xcode exists (macOS run + iOS simulator compile).
-# Linux proves the Foundation-only targets (and the canImport-gated
-# chart view) stay portable.
+# Pull requests validate ordinary changes; version/release tags validate the
+# merged commit. Do not also trigger branch pushes: GitHub sends independent
+# events for a branch update and a tag on the same SHA, which otherwise runs
+# this expensive three-platform matrix twice.
 
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
 
 jobs:
   spm-macos:

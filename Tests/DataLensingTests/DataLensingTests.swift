@@ -878,6 +878,75 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     }
 }
 
+@Test func replayableTransformationsPreserveSourceRowsAndDerivedValues() throws {
+    let table = try CSVTable.parse("""
+    id,x,y,label
+    0,1,10,keep
+    1,NA,20,missing-x
+    2,-2,30,negative-x
+    3,4,40,keep
+    """)
+    let replayed = try AnalysisTransformationExecutor.replay([
+        .selectColumns(["id", "x", "y"]),
+        .dropMissing(columns: ["x", "y"]),
+        .filterNumeric(column: "x", comparison: .greaterThanOrEqual, value: 0),
+        .naturalLog(source: "x", destination: "log_x"),
+    ], on: table)
+
+    #expect(replayed.sourceRowIndices == [0, 3])
+    #expect(replayed.columnNames == ["id", "x", "y", "log_x"])
+    #expect(replayed.numericValues(forColumn: "id") == [0, 3])
+    #expect(replayed.numericValues(forColumn: "x") == [1, 4])
+    #expect(replayed.numericValues(forColumn: "y") == [10, 40])
+    #expect(try #require(replayed.numericValues(forColumn: "log_x")).enumerated().allSatisfy {
+        abs($0.element - [0.0, log(4.0)][$0.offset]) < 1e-12
+    })
+    #expect(replayed.textValues(forColumn: "label") == nil)
+
+    #expect(throws: AnalysisTransformationError.nonNumericColumn("label")) {
+        _ = try AnalysisTransformationExecutor.replay([.naturalLog(source: "label", destination: "log_label")], on: table)
+    }
+    #expect(throws: AnalysisTransformationError.invalidTransformation) {
+        _ = try AnalysisTransformationExecutor.replay([.selectColumns([])], on: table)
+    }
+}
+
+@Test func documentReplayUsesOnlyAncestorTransformsAndRejectsChangedSources() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,NA\n2,5\n3,7\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let table = try CSVTable.load(contentsOf: url)
+    let source = try AnalysisDocument.Source.make(from: url, table: table)
+    let removeMissing = try AnalysisDocument.Block(
+        title: "Remove incomplete values", payload: .transformation(.dropMissing(columns: ["x", "y"]))
+    )
+    let keepLateRows = try AnalysisDocument.Block(
+        title: "Keep later rows", upstreamBlockIDs: [removeMissing.id],
+        payload: .transformation(.filterNumeric(column: "x", comparison: .greaterThanOrEqual, value: 2))
+    )
+    let recipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: ValidationConfiguration()
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Trend model", upstreamBlockIDs: [keepLateRows.id], payload: .model(recipe)
+    )
+    let document = try AnalysisDocument(
+        title: "Replay test", source: source, blocks: [removeMissing, keepLateRows, model]
+    )
+
+    let replay = try AnalysisTransformationExecutor.replay(
+        document: document, sourceURL: url, through: model.id
+    )
+    #expect(replay.appliedBlockIDs == [removeMissing.id, keepLateRows.id])
+    #expect(replay.table.sourceRowIndices == [2, 3])
+    #expect(replay.table.numericValues(forColumn: "y") == [5, 7])
+
+    try "x,y\n0,1\n1,2\n2,5\n3,7\n".write(to: url, atomically: true, encoding: .utf8)
+    #expect(throws: AnalysisTransformationError.sourceChanged) {
+        _ = try AnalysisTransformationExecutor.replay(document: document, sourceURL: url, through: model.id)
+    }
+}
+
 @Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {
     let xs = (0..<20).map { Double($0) / 5 }
     let ys = xs.map { 1.5 * $0 + 0.25 }

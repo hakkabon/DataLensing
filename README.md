@@ -50,6 +50,11 @@ swift test                         # 66 tests (see below)
 swift run data-lensing-app         # CLI on the bundled sine sample
 ```
 
+GitHub CI runs this matrix for pull requests and for tag pushes. Ordinary work
+is validated before merge; a release tag validates the merged SHA once, rather
+than duplicating the three-platform matrix for both the branch and tag events.
+Use the workflow's manual-dispatch control for a direct branch build.
+
 ```bash
 # Viewer app (macOS + iPad)
 xcodebuild -project Viewer/DataLensingViewer.xcodeproj \
@@ -187,16 +192,22 @@ Editing a source, transformation, or model marks all downstream blocks
 validation run must create a new evidence snapshot. Documents use strict
 versioned decoding, reject dangling dependencies and mismatched source
 fingerprints, and round-trip as stable pretty JSON. The initial transformation
-vocabulary records column selection, missing-value policy, numeric filters,
-and log-derived columns. Execution and UI editing are deliberately next steps,
-so saved intent never masquerades as an already-applied transformation.
+vocabulary covers column selection, missing-value policy, numeric filters, and
+log-derived columns.
+
+`AnalysisTransformationExecutor` now replays those operations against a CSV
+source, retaining original row IDs through every filter and derived column. A
+document replay follows only the transformations upstream of a selected target
+block and refuses source bytes whose fingerprint differs from the document.
+Changing data therefore requires an explicit source update and downstream
+staleness—not a silent substitution beneath existing evidence.
 
 The notebook roadmap is:
 
 1. Connect the current viewer's import, model, report, and workbench results
    to document creation/open/save.
-2. Implement a replayable transformation executor and show stale/current state
-   in the workbench.
+2. Show the executor's stale/current state and transformed-row provenance in
+   the workbench, then fit explicitly from a selected document model block.
 3. Add document navigation, annotated figures, and deliberate recomputation
    controls on macOS and iPadOS.
 

@@ -412,7 +412,7 @@ public enum AnalysisDocumentError: Error, Sendable, Hashable, CustomStringConver
     }
 }
 
-private extension AnalysisDocument.Transformation {
+extension AnalysisDocument.Transformation {
     var isValid: Bool {
         func validColumns(_ columns: [String]) -> Bool {
             !columns.isEmpty && Set(columns).count == columns.count
