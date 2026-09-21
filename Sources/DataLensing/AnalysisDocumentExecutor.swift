@@ -1,3 +1,4 @@
+import DataLens
 import DataTables
 import Foundation
 
@@ -30,6 +31,32 @@ public struct AnalysisDocumentFit: Sendable {
         self.trainingSourceRows = trainingSourceRows
         self.columns = columns
         self.transformedObservationCount = transformedObservationCount
+    }
+}
+
+/// A fitted unified GAM or multivariate model replayed from an analysis document.
+public struct AdvancedAnalysisDocumentFit: Sendable {
+    public let modelBlockID: UUID
+    public let recipe: AnalysisDocument.AdvancedModelRecipe
+    public let model: FittedStatisticalModel
+    /// Original CSV rows, parallel to the model's retained training rows.
+    public let sourceRows: [Int]
+    /// Original CSV rows before the model's missing-data handling.
+    public let trainingSourceRows: [Int]
+    /// The actual accepted multivariate solver, never inferred from preference.
+    public let solverBackend: MultivariateSolverBackend?
+
+    public init(
+        modelBlockID: UUID, recipe: AnalysisDocument.AdvancedModelRecipe,
+        model: FittedStatisticalModel, sourceRows: [Int], trainingSourceRows: [Int],
+        solverBackend: MultivariateSolverBackend?
+    ) {
+        self.modelBlockID = modelBlockID
+        self.recipe = recipe
+        self.model = model
+        self.sourceRows = sourceRows
+        self.trainingSourceRows = trainingSourceRows
+        self.solverBackend = solverBackend
     }
 }
 
@@ -95,6 +122,79 @@ public enum AnalysisDocumentExecutor {
         )
     }
 
+    /// Replay and fit a saved unified GAM or multivariate specification.
+    ///
+    /// The multivariate path is intentionally fitted directly here so the
+    /// accepted sparse/dense backend is retained as provenance instead of being
+    /// hidden behind the unified model wrapper.
+    public static func fitAdvanced(
+        document: AnalysisDocument, sourceURL: URL, modelBlockID: UUID
+    ) throws -> AdvancedAnalysisDocumentFit {
+        guard let block = document.blocks.first(where: { $0.id == modelBlockID }),
+              case .advancedModel(let recipe) = block.payload else {
+            throw AnalysisDocumentExecutionError.unknownAdvancedModelBlock(modelBlockID)
+        }
+        let replay = try AnalysisTransformationExecutor.replay(
+            document: document, sourceURL: sourceURL, through: modelBlockID
+        )
+        let predictorColumns = try recipe.predictorColumns.map { name -> [Double] in
+            guard let values = replay.table.numericValues(forColumn: name) else {
+                throw AnalysisDocumentExecutionError.missingNumericColumn(name)
+            }
+            return values
+        }
+        guard let response = replay.table.numericValues(forColumn: recipe.responseColumn) else {
+            throw AnalysisDocumentExecutionError.missingNumericColumn(recipe.responseColumn)
+        }
+        guard predictorColumns.allSatisfy({ $0.count == response.count }) else {
+            throw AnalysisDocumentExecutionError.invalidProvenance
+        }
+        let predictors = response.indices.map { row in predictorColumns.map { $0[row] } }
+
+        let fitted: FittedStatisticalModel
+        let solverBackend: MultivariateSolverBackend?
+        switch recipe.specification.strategy {
+        case .multivariateGaussian, .multivariateBinomial, .multivariatePoisson:
+            let family: MultivariateResponseFamily
+            switch recipe.specification.strategy {
+            case .multivariateGaussian: family = .gaussian
+            case .multivariateBinomial: family = .binomial
+            case .multivariatePoisson: family = .poisson
+            default: preconditionFailure("Covered by the enclosing switch")
+            }
+            guard let multivariate = MultivariateModel.fit(
+                trainX: predictors, trainY: response, family: family,
+                specification: recipe.specification.multivariate ?? MultivariateModelSpecification(),
+                droppingMissing: true
+            ).model else {
+                throw AnalysisDocumentExecutionError.fitFailed
+            }
+            fitted = FittedStatisticalModel(
+                multivariate: multivariate, specification: recipe.specification
+            )
+            solverBackend = multivariate.solverBackend
+        default:
+            guard let model = FittedStatisticalModel.fit(
+                trainX: predictors, trainY: response, specification: recipe.specification
+            ) else {
+                throw AnalysisDocumentExecutionError.fitFailed
+            }
+            fitted = model
+            solverBackend = nil
+        }
+        let sourceRows = try fitted.keptIndices.map { index -> Int in
+            guard replay.table.sourceRowIndices.indices.contains(index) else {
+                throw AnalysisDocumentExecutionError.invalidProvenance
+            }
+            return replay.table.sourceRowIndices[index]
+        }
+        return AdvancedAnalysisDocumentFit(
+            modelBlockID: modelBlockID, recipe: recipe, model: fitted,
+            sourceRows: sourceRows, trainingSourceRows: replay.table.sourceRowIndices,
+            solverBackend: solverBackend
+        )
+    }
+
     /// Start a document from a chart that the user has already deliberately
     /// fitted. The initial evidence makes that existing result auditable; later
     /// changes are always represented as new blocks or explicit recomputations.
@@ -146,6 +246,33 @@ public enum AnalysisDocumentExecutor {
         )
     }
 
+    /// Evaluate held-out calibration and optional deterministic bootstrap
+    /// stability using the exact advanced recipe retained by the document.
+    public static func advancedEvidenceSnapshot(
+        document: AnalysisDocument, fit: AdvancedAnalysisDocumentFit,
+        capturedAt: Date = Date()
+    ) throws -> AnalysisDocument.AdvancedModelEvidence {
+        // `ModelValidation` keeps its own retained-row ordering. The parallel
+        // `fit.sourceRows` remains the document's original-CSV provenance map.
+        let validation = CrossValidation.evaluate(
+            trainX: fit.model.trainingPredictors, trainY: fit.model.trainingResponses,
+            configuration: fit.recipe.validationConfiguration
+        )
+        let calibration = validation?.binomialCalibration()
+        let bootstrap = fit.recipe.bootstrapConfiguration.map { configuration in
+            ModelResampling.bootstrap(
+                trainX: fit.model.trainingPredictors, trainY: fit.model.trainingResponses,
+                queryPoints: fit.recipe.stabilityQueries, configuration: configuration
+            )
+        }
+        return try AnalysisDocument.AdvancedModelEvidence(
+            capturedAt: capturedAt, sourceFingerprint: document.source.fingerprint,
+            modelKind: fit.model.kind, diagnostics: fit.model.diagnostics,
+            solverBackend: fit.solverBackend, validation: validation,
+            calibration: calibration, bootstrap: bootstrap
+        )
+    }
+
     /// Statistical tools consume exactly the rows used by the document fit.
     public static func workbenchInput(
         document: AnalysisDocument, fit: AnalysisDocumentFit
@@ -173,24 +300,30 @@ public enum AnalysisDocumentExecutor {
         }
         return recipe
     }
+
 }
 
 /// Errors a host can present without treating saved document content as code.
 public enum AnalysisDocumentExecutionError: Error, Sendable, Hashable, CustomStringConvertible {
     case unknownModelBlock(UUID)
+    case unknownAdvancedModelBlock(UUID)
     case invalidModelRecipe
     case multivariateModelUnsupported
     case missingNumericColumn(String)
+    case fitFailed
     case invalidProvenance
 
     public var description: String {
         switch self {
         case .unknownModelBlock(let id): return "Unknown document model block \(id.uuidString)."
+        case .unknownAdvancedModelBlock(let id):
+            return "Unknown advanced document model block \(id.uuidString)."
         case .invalidModelRecipe: return "The saved model recipe is not supported."
         case .multivariateModelUnsupported:
             return "Document recomputation currently supports one predictor."
         case .missingNumericColumn(let name):
             return "The saved model requires numeric column '\(name)'."
+        case .fitFailed: return "The saved advanced model did not produce a converged fit."
         case .invalidProvenance: return "The replayed model returned invalid row provenance."
         }
     }

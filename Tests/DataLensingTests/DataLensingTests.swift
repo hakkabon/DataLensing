@@ -1033,6 +1033,83 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocumentExecutor.workbenchInput(document: document, fit: fit).sourceRows == [0, 2, 3])
 }
 
+@Test func advancedDocumentEvidenceRecordsGamValidationAndBootstrapStability() throws {
+    let rows = (0..<36).map { index -> String in
+        let x = Double(index) / 7
+        return "\(x),\(1.5 + sin(x) + 0.15 * x)"
+    }
+    let url = try scratchCSV("x,y\n" + rows.joined(separator: "\n") + "\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let specification = StatisticalModelSpecification(
+        strategy: .additiveGaussian,
+        additive: AdditiveModelSpecification(terms: [.init(predictorIndex: 0, span: 0.8)])
+    )
+    let recipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: specification,
+        validationConfiguration: ValidationConfiguration(
+            foldCount: 3, partitioning: .blocked, specification: specification
+        ),
+        bootstrapConfiguration: BootstrapConfiguration(
+            replicateCount: 3, minimumSuccessFraction: 0.5,
+            specification: specification
+        ),
+        stabilityQueries: [[2.5]]
+    )
+    let modelBlock = try AnalysisDocument.Block(
+        title: "Gaussian GAM", payload: .advancedModel(recipe)
+    )
+    var document = try AnalysisDocument(title: "GAM", source: source, blocks: [modelBlock])
+    let fit = try AnalysisDocumentExecutor.fitAdvanced(
+        document: document, sourceURL: url, modelBlockID: modelBlock.id
+    )
+    let evidence = try AnalysisDocumentExecutor.advancedEvidenceSnapshot(document: document, fit: fit)
+    #expect(fit.model.kind == .additiveGaussian)
+    #expect(fit.sourceRows == Array(0..<36))
+    #expect(evidence.validation?.responseFamily == .gaussian)
+    #expect(evidence.bootstrap?.attemptedReplicates == 3)
+    let evidenceBlock = try AnalysisDocument.Block(
+        title: "GAM evidence", upstreamBlockIDs: [modelBlock.id], payload: .advancedEvidence(evidence)
+    )
+    try document.append(evidenceBlock)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+}
+
+@Test func advancedDocumentMultivariateFitRecordsActualSolverBackend() throws {
+    var rows: [String] = []
+    for index in 0..<42 {
+        let x = Double(index % 7) / 3
+        let z = Double(index / 7) / 2
+        let response = 1 + 0.7 * x - 0.25 * z + 0.1 * x * z
+        rows.append("\(x),\(z),\(response)")
+    }
+    let url = try scratchCSV("x,z,y\n" + rows.joined(separator: "\n") + "\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let multivariate = MultivariateModelSpecification(
+        terms: [.spline(.init(predictorIndex: 0, knotCount: 1)),
+                .spline(.init(predictorIndex: 1, knotCount: 1))],
+        penaltyWeight: 1, solverPreference: .denseQR
+    )
+    let specification = StatisticalModelSpecification(
+        strategy: .multivariateGaussian, multivariate: multivariate
+    )
+    let recipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x", "z"], responseColumn: "y", specification: specification,
+        validationConfiguration: ValidationConfiguration(
+            foldCount: 3, partitioning: .blocked, specification: specification
+        )
+    )
+    let block = try AnalysisDocument.Block(title: "Multivariate spline", payload: .advancedModel(recipe))
+    let document = try AnalysisDocument(title: "Surface", source: source, blocks: [block])
+    let fit = try AnalysisDocumentExecutor.fitAdvanced(
+        document: document, sourceURL: url, modelBlockID: block.id
+    )
+    #expect(fit.model.kind == StatisticalModelKind.multivariateGaussian)
+    #expect(fit.solverBackend == MultivariateSolverBackend.denseQR)
+    #expect(fit.sourceRows == Array(0..<42))
+}
+
 @Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {
     let xs = (0..<20).map { Double($0) / 5 }
     let ys = xs.map { 1.5 * $0 + 0.25 }

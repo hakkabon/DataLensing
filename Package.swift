@@ -13,11 +13,12 @@ let package = Package(
         .executable(name: "data-lensing-app", targets: ["DataLensingApp"]),
     ],
     dependencies: [
-        // Swift-DataLens 0.15.x closes its NumericCore 0.6 / Rust 0.4
-        // release chain. Keep DataLensing on tagged compatible releases;
-        // source-head compatibility is covered separately in CI.
+        // Swift-DataLens 0.19.x adds unified GAM/multivariate model contracts,
+        // calibration/stability evidence, and sparse-solver provenance.
+        // Keep DataLensing on tagged compatible releases; source-head
+        // compatibility is covered separately in CI.
         .package(url: "https://github.com/hakkabon/Swift-DataLens.git",
-                 .upToNextMinor(from: "0.15.0")),
+                 .upToNextMinor(from: "0.19.0")),
     ],
     targets: [
         .target(

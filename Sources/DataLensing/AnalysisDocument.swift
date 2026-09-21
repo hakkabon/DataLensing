@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let id: UUID
     public let schemaVersion: Int
@@ -183,6 +183,68 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A replayable unified model recipe for GAMs and multivariate models.
+    ///
+    /// Column names belong to the document rather than a view, while the
+    /// `StatisticalModelSpecification` retains family, terms, penalties, and
+    /// numerical-solver preference. Validation and bootstrap configurations
+    /// repeat that specification so an evidence run cannot silently validate a
+    /// different statistical model.
+    public struct AdvancedModelRecipe: Codable, Sendable, Hashable {
+        public let predictorColumns: [String]
+        public let responseColumn: String
+        public let specification: StatisticalModelSpecification
+        public let validationConfiguration: ValidationConfiguration
+        /// `nil` means stability resampling was intentionally not requested.
+        public let bootstrapConfiguration: BootstrapConfiguration?
+        /// Prediction rows for bootstrap stability intervals, in predictor order.
+        public let stabilityQueries: [[Double]]
+
+        public init(
+            predictorColumns: [String], responseColumn: String,
+            specification: StatisticalModelSpecification,
+            validationConfiguration: ValidationConfiguration,
+            bootstrapConfiguration: BootstrapConfiguration? = nil,
+            stabilityQueries: [[Double]] = []
+        ) throws {
+            guard !predictorColumns.isEmpty,
+                  Set(predictorColumns).count == predictorColumns.count,
+                  predictorColumns.allSatisfy(Self.isValidColumnName),
+                  Self.isValidColumnName(responseColumn),
+                  !predictorColumns.contains(responseColumn),
+                  validationConfiguration.specification == specification,
+                  bootstrapConfiguration?.specification == specification || bootstrapConfiguration == nil,
+                  stabilityQueries.allSatisfy({
+                      $0.count == predictorColumns.count && $0.allSatisfy(\.isFinite)
+                  }),
+                  bootstrapConfiguration == nil || !stabilityQueries.isEmpty else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.predictorColumns = predictorColumns
+            self.responseColumn = responseColumn
+            self.specification = specification
+            self.validationConfiguration = validationConfiguration
+            self.bootstrapConfiguration = bootstrapConfiguration
+            self.stabilityQueries = stabilityQueries
+        }
+
+        fileprivate var isValid: Bool {
+            !predictorColumns.isEmpty && Set(predictorColumns).count == predictorColumns.count
+                && predictorColumns.allSatisfy(Self.isValidColumnName)
+                && Self.isValidColumnName(responseColumn) && !predictorColumns.contains(responseColumn)
+                && validationConfiguration.specification == specification
+                && (bootstrapConfiguration == nil || bootstrapConfiguration?.specification == specification)
+                && stabilityQueries.allSatisfy {
+                    $0.count == predictorColumns.count && $0.allSatisfy(\.isFinite)
+                }
+                && (bootstrapConfiguration == nil || !stabilityQueries.isEmpty)
+        }
+
+        private static func isValidColumnName(_ value: String) -> Bool {
+            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     /// Frozen diagnostic and validation evidence. A later replay must create a
     /// new snapshot rather than silently overwrite this result.
     public struct EvidenceSnapshot: Codable, Sendable, Hashable {
@@ -207,6 +269,58 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
 
         fileprivate var isValid: Bool {
             !sourceFingerprint.isEmpty && Set(workbenchOutputs.map(\.id)).count == workbenchOutputs.count
+        }
+    }
+
+    /// Frozen evidence for a unified GAM or multivariate statistical model.
+    ///
+    /// Calibration is derived solely from held-out predictions, and bootstrap
+    /// output retains failed-replicate accounting. `solverBackend` is populated
+    /// only when the advanced fit used a multivariate numerical solve.
+    public struct AdvancedModelEvidence: Codable, Sendable, Hashable {
+        public let capturedAt: Date
+        public let sourceFingerprint: String
+        public let modelKind: StatisticalModelKind
+        public let diagnostics: FitDiagnostics
+        public let solverBackend: MultivariateSolverBackend?
+        public let validation: ModelValidation?
+        public let calibration: BinomialCalibration?
+        public let bootstrap: BootstrapResult?
+
+        public init(
+            capturedAt: Date = Date(), sourceFingerprint: String,
+            modelKind: StatisticalModelKind, diagnostics: FitDiagnostics,
+            solverBackend: MultivariateSolverBackend? = nil,
+            validation: ModelValidation? = nil, calibration: BinomialCalibration? = nil,
+            bootstrap: BootstrapResult? = nil
+        ) throws {
+            guard !sourceFingerprint.isEmpty,
+                  calibration.map({ calibration in
+                      validation?.responseFamily == .binomial
+                          && calibration.observationCount == validation?.retainedObservationCount
+                  }) ?? true,
+                  bootstrap.map({ $0.configuration.specification == validation?.configuration.specification
+                      || validation == nil }) ?? true else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.capturedAt = capturedAt
+            self.sourceFingerprint = sourceFingerprint
+            self.modelKind = modelKind
+            self.diagnostics = diagnostics
+            self.solverBackend = solverBackend
+            self.validation = validation
+            self.calibration = calibration
+            self.bootstrap = bootstrap
+        }
+
+        fileprivate var isValid: Bool {
+            !sourceFingerprint.isEmpty
+                && (calibration.map {
+                    validation?.responseFamily == .binomial
+                        && $0.observationCount == validation?.retainedObservationCount
+                } ?? true)
+                && (bootstrap.map { $0.configuration.specification == validation?.configuration.specification
+                    || validation == nil } ?? true)
         }
     }
 
@@ -242,7 +356,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     public enum BlockPayload: Codable, Sendable, Hashable {
         case transformation(Transformation)
         case model(ModelRecipe)
+        case advancedModel(AdvancedModelRecipe)
         case evidence(EvidenceSnapshot)
+        case advancedEvidence(AdvancedModelEvidence)
         case figure(FigureAnnotation)
         case note(String)
     }
@@ -298,7 +414,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             switch payload {
             case .transformation(let transformation): return transformation.isValid
             case .model(let recipe): return recipe.isValid
+            case .advancedModel(let recipe): return recipe.isValid
             case .evidence(let evidence): return evidence.isValid
+            case .advancedEvidence(let evidence): return evidence.isValid
             case .figure(let figure): return figure.isValid
             case .note(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -382,6 +500,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }?.id
     }
 
+    /// Most recent unified-GAM or multivariate model recipe.
+    public var latestAdvancedModelBlockID: UUID? {
+        blocks.last { block in
+            if case .advancedModel = block.payload { return true }
+            return false
+        }?.id
+    }
+
     /// Stable JSON intended for project files or clipboard/export transfer.
     public func jsonData() throws -> Data {
         let encoder = JSONEncoder()
@@ -410,9 +536,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         guard (1...Self.currentSchemaVersion).contains(decodedSchemaVersion) else {
             throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
-        // Version 1 did not contain annotated figures. Its remaining block
-        // representation is unchanged, so normalize it on open and write the
-        // upgraded schema only when the host later saves the document.
+        // Versions 1 and 2 predate advanced model/evidence blocks. Their
+        // existing representation is unchanged, so normalize on open and
+        // write the upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }
@@ -453,6 +579,12 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
             }
+            if case .advancedEvidence(let evidence) = block.payload {
+                guard evidence.sourceFingerprint == source.fingerprint,
+                      hasDirectAdvancedModelDependency(block) else {
+                    throw AnalysisDocumentError.invalidEvidence(block.id)
+                }
+            }
             if case .figure = block.payload, !hasDirectModelDependency(block) {
                 throw AnalysisDocumentError.invalidDependency(block.id)
             }
@@ -463,7 +595,18 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     private func hasDirectModelDependency(_ block: Block) -> Bool {
         block.upstreamBlockIDs.contains { id in
             blocks.first(where: { $0.id == id }).map { candidate in
-                if case .model = candidate.payload { return true }
+                switch candidate.payload {
+                case .model, .advancedModel: return true
+                default: return false
+                }
+            } ?? false
+        }
+    }
+
+    private func hasDirectAdvancedModelDependency(_ block: Block) -> Bool {
+        block.upstreamBlockIDs.contains { id in
+            blocks.first(where: { $0.id == id }).map { candidate in
+                if case .advancedModel = candidate.payload { return true }
                 return false
             } ?? false
         }

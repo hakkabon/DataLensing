@@ -71,6 +71,23 @@ private struct AnalysisDocumentFile: FileDocument {
     }
 }
 
+private enum AdvancedStrategyChoice: String, CaseIterable, Identifiable {
+    case gaussianGAM = "Gaussian GAM"
+    case binomialGAM = "Binomial GAM"
+    case poissonGAM = "Poisson GAM"
+    case gaussianMultivariate = "Gaussian multivariate"
+    case binomialMultivariate = "Binomial multivariate"
+    case poissonMultivariate = "Poisson multivariate"
+
+    var id: String { rawValue }
+    var requiresSecondPredictor: Bool {
+        switch self {
+        case .gaussianMultivariate, .binomialMultivariate, .poissonMultivariate: true
+        default: false
+        }
+    }
+}
+
 struct ContentView: View {
     private enum Phase {
         case idle
@@ -119,6 +136,11 @@ struct ContentView: View {
     @State private var showingDocumentExporter = false
     @State private var documentExport: AnalysisDocumentFile?
     @State private var figureCaption = ""
+    @State private var advancedStrategy: AdvancedStrategyChoice = .gaussianGAM
+    @State private var advancedSolver: MultivariateSolverPreference = .automatic
+    @State private var advancedBootstrap = false
+    @State private var advancedTask: Task<Void, Never>?
+    @State private var advancedLoading = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -281,6 +303,35 @@ struct ContentView: View {
                             appendFigureAnnotation(from: built)
                         }
                         .disabled(documentRecomputing || document.latestModelBlockID == nil)
+
+                        Divider()
+                        Picker("Advanced model", selection: $advancedStrategy) {
+                            ForEach(AdvancedStrategyChoice.allCases) { choice in
+                                Text(choice.rawValue).tag(choice)
+                            }
+                        }
+                        if advancedStrategy.requiresSecondPredictor {
+                            Picker("Numerical solve", selection: $advancedSolver) {
+                                Text("Automatic").tag(MultivariateSolverPreference.automatic)
+                                Text("Dense QR").tag(MultivariateSolverPreference.denseQR)
+                                Text("Sparse CGLS").tag(MultivariateSolverPreference.sparseCGLS)
+                            }
+                        } else {
+                            Toggle("Bootstrap stability (50)", isOn: $advancedBootstrap)
+                        }
+                        Button {
+                            fitAndRecordAdvancedModel(from: built)
+                        } label: {
+                            if advancedLoading {
+                                Label("Fitting Advanced Model…", systemImage: "gearshape.2")
+                            } else {
+                                Label("Fit & Record Advanced Model", systemImage: "function")
+                            }
+                        }
+                        .disabled(
+                            documentRecomputing || advancedLoading || documentSourceURL != built.fileURL
+                                || (advancedStrategy.requiresSecondPredictor && selectedX2 == nil)
+                        )
                     }
 
                     Button("Save Document…") { saveDocument() }
@@ -791,7 +842,9 @@ struct ContentView: View {
         switch block.payload {
         case .transformation: "line.3.horizontal.decrease.circle"
         case .model: "function"
+        case .advancedModel: "function"
         case .evidence: "checklist"
+        case .advancedEvidence: "checklist"
         case .figure: "chart.xyaxis.line"
         case .note: "note.text"
         }
@@ -801,8 +854,20 @@ struct ContentView: View {
         switch block.payload {
         case .transformation: return "Replayable transformation"
         case .model(let recipe): return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response)"
+        case .advancedModel(let recipe):
+            return "\(recipe.specification.strategy.rawValue) · \(recipe.predictorColumns.joined(separator: ", ")) → \(recipe.responseColumn)"
         case .evidence(let evidence):
             return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"
+        case .advancedEvidence(let evidence):
+            let validation = evidence.validation?.primaryScore.map { String(format: "score %.4g", $0) }
+            let solver = evidence.solverBackend?.rawValue
+            let calibration = evidence.calibration.map {
+                String(format: "Brier %.4g · ECE %.4g", $0.brierScore, $0.expectedCalibrationError)
+            }
+            let bootstrap = evidence.bootstrap.map { "bootstrap \($0.successfulReplicates)/\($0.attemptedReplicates)" }
+            let edf = String(format: "EDF %.3g", evidence.diagnostics.effectiveDegreesOfFreedom)
+            return [evidence.modelKind.rawValue, edf, solver, validation, calibration, bootstrap]
+                .compactMap { $0 }.joined(separator: " · ")
         case .figure(let figure): return figure.caption
         case .note(let text): return text
         }
@@ -1008,6 +1073,131 @@ struct ContentView: View {
         if activePlanes.contains(.residuals) { return .residuals }
         if activePlanes.contains(.gradient) { return .gradient }
         return .fittedCurve
+    }
+
+    private func advancedRecipe(for built: BuiltChart) throws -> AnalysisDocument.AdvancedModelRecipe {
+        var predictors = [built.controller.xName]
+        if advancedStrategy.requiresSecondPredictor {
+            guard let selectedX2, selectedX2 != built.controller.xName else {
+                throw AnalysisDocumentExecutionError.invalidModelRecipe
+            }
+            predictors.append(selectedX2)
+        }
+        let strategy: StatisticalModelStrategy
+        let specification: StatisticalModelSpecification
+        switch advancedStrategy {
+        case .gaussianGAM:
+            strategy = .additiveGaussian
+            specification = StatisticalModelSpecification(
+                strategy: strategy,
+                additive: AdditiveModelSpecification(
+                    terms: predictors.indices.map { AdditiveTermSpecification(predictorIndex: $0) }
+                )
+            )
+        case .binomialGAM, .poissonGAM:
+            strategy = advancedStrategy == .binomialGAM ? .additiveBinomial : .additivePoisson
+            specification = StatisticalModelSpecification(
+                strategy: strategy,
+                likelihoodAdditive: LikelihoodAdditiveModelSpecification(
+                    terms: predictors.indices.map { LikelihoodAdditiveTermSpecification(predictorIndex: $0) }
+                )
+            )
+        case .gaussianMultivariate, .binomialMultivariate, .poissonMultivariate:
+            switch advancedStrategy {
+            case .gaussianMultivariate: strategy = .multivariateGaussian
+            case .binomialMultivariate: strategy = .multivariateBinomial
+            case .poissonMultivariate: strategy = .multivariatePoisson
+            default: preconditionFailure("Covered by the enclosing switch")
+            }
+            specification = StatisticalModelSpecification(
+                strategy: strategy,
+                multivariate: MultivariateModelSpecification(
+                    terms: predictors.indices.map {
+                        .spline(SplineTermSpecification(predictorIndex: $0, knotCount: 3))
+                    }, solverPreference: advancedSolver
+                )
+            )
+        }
+        let partitioning: ValidationPartitioning = strategy == .additiveBinomial
+            || strategy == .multivariateBinomial ? .stratifiedBinary : .blocked
+        let validation = ValidationConfiguration(
+            foldCount: 5, partitioning: partitioning, specification: specification
+        )
+        let query: [[Double]]
+        let bootstrap: BootstrapConfiguration?
+        if advancedBootstrap && !advancedStrategy.requiresSecondPredictor {
+            guard
+                  let median = built.loaded.model.rawX.sorted().dropFirst(
+                      max(0, built.loaded.model.rawX.count - 1) / 2
+                  ).first else {
+                throw AnalysisDocumentExecutionError.invalidModelRecipe
+            }
+            query = [[median]]
+            bootstrap = BootstrapConfiguration(
+                replicateCount: 50, minimumSuccessFraction: 0.8, specification: specification
+            )
+        } else {
+            query = []
+            bootstrap = nil
+        }
+        return try AnalysisDocument.AdvancedModelRecipe(
+            predictorColumns: predictors, responseColumn: built.controller.yName,
+            specification: specification, validationConfiguration: validation,
+            bootstrapConfiguration: bootstrap, stabilityQueries: query
+        )
+    }
+
+    private func fitAndRecordAdvancedModel(from built: BuiltChart) {
+        guard let document = analysisDocument, let sourceURL = documentSourceURL else { return }
+        advancedTask?.cancel()
+        documentError = nil
+        advancedLoading = true
+        do {
+            let recipe = try advancedRecipe(for: built)
+            let upstream = document.latestModelBlockID.map { [$0] } ?? []
+            let modelBlock = try AnalysisDocument.Block(
+                title: advancedStrategy.rawValue, upstreamBlockIDs: upstream,
+                payload: .advancedModel(recipe)
+            )
+            var prepared = document
+            try prepared.append(modelBlock)
+            advancedTask = Task {
+                do {
+                    let run = try await Task.detached(priority: .userInitiated) {
+                        try scopedAdvancedDocumentRun(
+                            document: prepared, sourceURL: sourceURL, modelBlockID: modelBlock.id
+                        )
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    var updated = prepared
+                    let figureKind: AnalysisDocument.FigureAnnotation.Kind = advancedStrategy.requiresSecondPredictor
+                        ? .surface : .fittedCurve
+                    let figure = try AnalysisDocument.FigureAnnotation(
+                        kind: figureKind,
+                        caption: "\(advancedStrategy.rawValue) fit: \(recipe.responseColumn) by \(recipe.predictorColumns.joined(separator: ", "))."
+                    )
+                    try updated.append(AnalysisDocument.Block(
+                        title: "Advanced model figure", upstreamBlockIDs: [modelBlock.id], payload: .figure(figure)
+                    ))
+                    try updated.append(AnalysisDocument.Block(
+                        title: "Advanced validation evidence", upstreamBlockIDs: [modelBlock.id],
+                        payload: .advancedEvidence(run.evidence)
+                    ))
+                    analysisDocument = updated
+                    advancedLoading = false
+                } catch is CancellationError {
+                    guard !Task.isCancelled else { return }
+                    advancedLoading = false
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    documentError = String(describing: error)
+                    advancedLoading = false
+                }
+            }
+        } catch {
+            documentError = String(describing: error)
+            advancedLoading = false
+        }
     }
 
     /// Live windowed-policy readout: what the chart reports visible,
@@ -1450,6 +1640,11 @@ private struct DocumentRecomputeResult: Sendable {
     let outputs: [WorkbenchOutput]
 }
 
+private struct AdvancedDocumentRun: Sendable {
+    let fit: AdvancedAnalysisDocumentFit
+    let evidence: AnalysisDocument.AdvancedModelEvidence
+}
+
 /// Keep the security-scoped resource alive across the complete replay, fit,
 /// and validation run selected from the document workbench.
 private func scopedDocumentRecompute(
@@ -1467,4 +1662,20 @@ private func scopedDocumentRecompute(
     let outputs = try await WorkbenchCatalog.builtIns.runAll(on: input)
     try Task.checkCancellation()
     return DocumentRecomputeResult(fit: fit, outputs: outputs)
+}
+
+/// The advanced workflow keeps one security-scoped source available for
+/// parsing, fitting, held-out validation, and optional bootstrap refits.
+private func scopedAdvancedDocumentRun(
+    document: AnalysisDocument, sourceURL: URL, modelBlockID: UUID
+) throws -> AdvancedDocumentRun {
+    let didAccess = sourceURL.startAccessingSecurityScopedResource()
+    defer {
+        if didAccess { sourceURL.stopAccessingSecurityScopedResource() }
+    }
+    let fit = try AnalysisDocumentExecutor.fitAdvanced(
+        document: document, sourceURL: sourceURL, modelBlockID: modelBlockID
+    )
+    let evidence = try AnalysisDocumentExecutor.advancedEvidenceSnapshot(document: document, fit: fit)
+    return AdvancedDocumentRun(fit: fit, evidence: evidence)
 }
