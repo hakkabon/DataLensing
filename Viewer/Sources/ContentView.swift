@@ -334,6 +334,8 @@ struct ContentView: View {
                         )
                     }
 
+                    numericalExecutionPanel(for: document)
+
                     Button("Save Document…") { saveDocument() }
                         .disabled(documentRecomputing)
                     Button("Open Different Document…") { showingDocumentImporter = true }
@@ -818,6 +820,49 @@ struct ContentView: View {
         .foregroundStyle(stale == 0 ? .green : .orange)
     }
 
+    private func latestAdvancedEvidence(in document: AnalysisDocument) -> AnalysisDocument.AdvancedModelEvidence? {
+        for block in document.blocks.reversed() {
+            guard case .advancedEvidence(let evidence) = block.payload else { continue }
+            return evidence
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private func numericalExecutionPanel(for document: AnalysisDocument) -> some View {
+        if let evidence = latestAdvancedEvidence(in: document),
+           let requested = evidence.requestedSolverPreference {
+            Divider()
+            VStack(alignment: .leading, spacing: 3) {
+                Label("Numerical execution", systemImage: "cpu")
+                    .font(.caption.weight(.semibold))
+                Text("Requested: \(requested.rawValue)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("Accepted: \(evidence.solverBackend?.rawValue ?? "not recorded")")
+                    .font(.caption2)
+                    .foregroundStyle(evidence.solverBackend == .sparseCGLS ? .green : .secondary)
+                if let sparse = evidence.sparseExecution {
+                    Text(String(
+                        format: "Native CSR · %d × %d · %d nnz · %d iter · residual %.2g",
+                        sparse.designRows, sparse.designColumns, sparse.nonZeroCount,
+                        sparse.iterations, sparse.normalResidualNorm
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                } else if evidence.solverBackend == .denseQRFallback {
+                    Text("Sparse dispatch did not converge; automatic policy accepted dense QR.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                } else if evidence.solverBackend == .denseQR {
+                    Text("Dense QR was selected; no sparse execution record applies.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private func documentBlockRow(_ block: AnalysisDocument.Block) -> some View {
         HStack(alignment: .top, spacing: 6) {
@@ -860,13 +905,18 @@ struct ContentView: View {
             return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"
         case .advancedEvidence(let evidence):
             let validation = evidence.validation?.primaryScore.map { String(format: "score %.4g", $0) }
-            let solver = evidence.solverBackend?.rawValue
+            let requested = evidence.requestedSolverPreference.map { "requested \($0.rawValue)" }
+            let solver = evidence.solverBackend.map { "accepted \($0.rawValue)" }
+            let sparse = evidence.sparseExecution.map {
+                String(format: "CSR %d×%d · %d nnz · %d iter", $0.designRows,
+                       $0.designColumns, $0.nonZeroCount, $0.iterations)
+            }
             let calibration = evidence.calibration.map {
                 String(format: "Brier %.4g · ECE %.4g", $0.brierScore, $0.expectedCalibrationError)
             }
             let bootstrap = evidence.bootstrap.map { "bootstrap \($0.successfulReplicates)/\($0.attemptedReplicates)" }
             let edf = String(format: "EDF %.3g", evidence.diagnostics.effectiveDegreesOfFreedom)
-            return [evidence.modelKind.rawValue, edf, solver, validation, calibration, bootstrap]
+            return [evidence.modelKind.rawValue, edf, requested, solver, sparse, validation, calibration, bootstrap]
                 .compactMap { $0 }.joined(separator: " · ")
         case .figure(let figure): return figure.caption
         case .note(let text): return text

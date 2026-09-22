@@ -45,11 +45,18 @@ public struct AdvancedAnalysisDocumentFit: Sendable {
     public let trainingSourceRows: [Int]
     /// The actual accepted multivariate solver, never inferred from preference.
     public let solverBackend: MultivariateSolverBackend?
+    /// The saved numerical policy requested for a multivariate fit.
+    public let requestedSolverPreference: MultivariateSolverPreference?
+    /// CGLS dimensions, convergence, and residual retained only when native
+    /// sparse execution supplied the accepted final update.
+    public let sparseExecution: SparseExecutionEvidence?
 
     public init(
         modelBlockID: UUID, recipe: AnalysisDocument.AdvancedModelRecipe,
         model: FittedStatisticalModel, sourceRows: [Int], trainingSourceRows: [Int],
-        solverBackend: MultivariateSolverBackend?
+        solverBackend: MultivariateSolverBackend?,
+        requestedSolverPreference: MultivariateSolverPreference?,
+        sparseExecution: SparseExecutionEvidence?
     ) {
         self.modelBlockID = modelBlockID
         self.recipe = recipe
@@ -57,6 +64,8 @@ public struct AdvancedAnalysisDocumentFit: Sendable {
         self.sourceRows = sourceRows
         self.trainingSourceRows = trainingSourceRows
         self.solverBackend = solverBackend
+        self.requestedSolverPreference = requestedSolverPreference
+        self.sparseExecution = sparseExecution
     }
 }
 
@@ -153,6 +162,8 @@ public enum AnalysisDocumentExecutor {
 
         let fitted: FittedStatisticalModel
         let solverBackend: MultivariateSolverBackend?
+        let requestedSolverPreference: MultivariateSolverPreference?
+        let sparseExecution: SparseExecutionEvidence?
         switch recipe.specification.strategy {
         case .multivariateGaussian, .multivariateBinomial, .multivariatePoisson:
             let family: MultivariateResponseFamily
@@ -173,6 +184,8 @@ public enum AnalysisDocumentExecutor {
                 multivariate: multivariate, specification: recipe.specification
             )
             solverBackend = multivariate.solverBackend
+            requestedSolverPreference = recipe.specification.multivariate?.solverPreference ?? .automatic
+            sparseExecution = multivariate.sparseExecution
         default:
             guard let model = FittedStatisticalModel.fit(
                 trainX: predictors, trainY: response, specification: recipe.specification
@@ -181,6 +194,8 @@ public enum AnalysisDocumentExecutor {
             }
             fitted = model
             solverBackend = nil
+            requestedSolverPreference = nil
+            sparseExecution = nil
         }
         let sourceRows = try fitted.keptIndices.map { index -> Int in
             guard replay.table.sourceRowIndices.indices.contains(index) else {
@@ -191,7 +206,9 @@ public enum AnalysisDocumentExecutor {
         return AdvancedAnalysisDocumentFit(
             modelBlockID: modelBlockID, recipe: recipe, model: fitted,
             sourceRows: sourceRows, trainingSourceRows: replay.table.sourceRowIndices,
-            solverBackend: solverBackend
+            solverBackend: solverBackend,
+            requestedSolverPreference: requestedSolverPreference,
+            sparseExecution: sparseExecution
         )
     }
 
@@ -268,7 +285,9 @@ public enum AnalysisDocumentExecutor {
         return try AnalysisDocument.AdvancedModelEvidence(
             capturedAt: capturedAt, sourceFingerprint: document.source.fingerprint,
             modelKind: fit.model.kind, diagnostics: fit.model.diagnostics,
-            solverBackend: fit.solverBackend, validation: validation,
+            requestedSolverPreference: fit.requestedSolverPreference,
+            solverBackend: fit.solverBackend, sparseExecution: fit.sparseExecution,
+            validation: validation,
             calibration: calibration, bootstrap: bootstrap
         )
     }

@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let id: UUID
     public let schemaVersion: Int
@@ -275,14 +275,22 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     /// Frozen evidence for a unified GAM or multivariate statistical model.
     ///
     /// Calibration is derived solely from held-out predictions, and bootstrap
-    /// output retains failed-replicate accounting. `solverBackend` is populated
-    /// only when the advanced fit used a multivariate numerical solve.
+    /// output retains failed-replicate accounting. Numerical provenance records
+    /// the requested policy separately from the backend actually accepted.
     public struct AdvancedModelEvidence: Codable, Sendable, Hashable {
         public let capturedAt: Date
         public let sourceFingerprint: String
         public let modelKind: StatisticalModelKind
         public let diagnostics: FitDiagnostics
+        /// Requested policy from the saved multivariate specification.
+        /// `nil` means the fitted model did not use a multivariate numerical solve.
+        public let requestedSolverPreference: MultivariateSolverPreference?
+        /// The final accepted backend. This must never be inferred from the
+        /// requested policy, because automatic sparse dispatch may fall back.
         public let solverBackend: MultivariateSolverBackend?
+        /// Immutable Rust-NumericCore CGLS evidence for an accepted native CSR
+        /// final update. It is absent for dense execution and older documents.
+        public let sparseExecution: SparseExecutionEvidence?
         public let validation: ModelValidation?
         public let calibration: BinomialCalibration?
         public let bootstrap: BootstrapResult?
@@ -290,7 +298,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public init(
             capturedAt: Date = Date(), sourceFingerprint: String,
             modelKind: StatisticalModelKind, diagnostics: FitDiagnostics,
+            requestedSolverPreference: MultivariateSolverPreference? = nil,
             solverBackend: MultivariateSolverBackend? = nil,
+            sparseExecution: SparseExecutionEvidence? = nil,
             validation: ModelValidation? = nil, calibration: BinomialCalibration? = nil,
             bootstrap: BootstrapResult? = nil
         ) throws {
@@ -300,14 +310,24 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                           && calibration.observationCount == validation?.retainedObservationCount
                   }) ?? true,
                   bootstrap.map({ $0.configuration.specification == validation?.configuration.specification
-                      || validation == nil }) ?? true else {
+                      || validation == nil }) ?? true,
+                  sparseExecution.map({ execution in
+                      requestedSolverPreference != nil && solverBackend == .sparseCGLS
+                          && execution.converged && execution.designRows > 0
+                          && execution.designColumns > 1 && execution.nonZeroCount >= execution.designRows
+                          && execution.iterations > 0 && execution.normalResidualNorm.isFinite
+                          && execution.weightedResidualSumOfSquares.isFinite
+                          && execution.penaltyContribution.isFinite
+                  }) ?? true else {
                 throw AnalysisDocumentError.invalidConfiguration
             }
             self.capturedAt = capturedAt
             self.sourceFingerprint = sourceFingerprint
             self.modelKind = modelKind
             self.diagnostics = diagnostics
+            self.requestedSolverPreference = requestedSolverPreference
             self.solverBackend = solverBackend
+            self.sparseExecution = sparseExecution
             self.validation = validation
             self.calibration = calibration
             self.bootstrap = bootstrap
@@ -321,6 +341,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 } ?? true)
                 && (bootstrap.map { $0.configuration.specification == validation?.configuration.specification
                     || validation == nil } ?? true)
+                && (sparseExecution.map { execution in
+                    requestedSolverPreference != nil && solverBackend == .sparseCGLS
+                        && execution.converged && execution.designRows > 0
+                        && execution.designColumns > 1 && execution.nonZeroCount >= execution.designRows
+                        && execution.iterations > 0 && execution.normalResidualNorm.isFinite
+                        && execution.weightedResidualSumOfSquares.isFinite
+                        && execution.penaltyContribution.isFinite
+                } ?? true)
         }
     }
 
@@ -536,7 +564,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         guard (1...Self.currentSchemaVersion).contains(decodedSchemaVersion) else {
             throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
-        // Versions 1 and 2 predate advanced model/evidence blocks. Their
+        // Versions 1 and 2 predate advanced model/evidence blocks; version 3
+        // predates native sparse-execution evidence. Their
         // existing representation is unchanged, so normalize on open and
         // write the upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion

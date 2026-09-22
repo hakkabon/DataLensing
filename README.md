@@ -202,14 +202,18 @@ block and refuses source bytes whose fingerprint differs from the document.
 Changing data therefore requires an explicit source update and downstream
 staleness—not a silent substitution beneath existing evidence.
 
-The notebook roadmap is:
+The document workbench now creates, opens, saves, annotates, and explicitly
+recomputes those records on macOS and iPadOS. Advanced model evidence also
+preserves held-out validation, calibration, bootstrap stability, and numerical
+execution provenance: the requested solver policy, accepted backend, and—when
+native CGLS was accepted—the CSR shape, nonzero count, iterations, convergence,
+normal residual, and working objective. A document therefore distinguishes an
+explicit sparse request, an automatic dense selection, and an automatic sparse
+fallback rather than treating a preference as proof of execution.
 
-1. Connect the current viewer's import, model, report, and workbench results
-   to document creation/open/save.
-2. Show the executor's stale/current state and transformed-row provenance in
-   the workbench, then fit explicitly from a selected document model block.
-3. Add document navigation, annotated figures, and deliberate recomputation
-   controls on macOS and iPadOS.
+The next notebook steps are reusable validation plans and explicit analysis-run
+records, followed by review-ready comparisons and annotations tied to frozen
+evidence blocks.
 
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
@@ -268,7 +272,7 @@ and replay the recorded configuration. **Copy Workbench Session** is available
 from the sidebar and `⌘⇧W` on macOS.
 
 Swift package resolution uses compatible tagged release ranges:
-DataLensing consumes Swift-DataLens `0.15.x`, which in turn resolves its
+DataLensing consumes Swift-DataLens `0.20.x`, which in turn resolves its
 compatible Swift-NumericCore release. The ecosystem compatibility workflow
 continues to exercise source-head integration separately from these stable
 consumer constraints.

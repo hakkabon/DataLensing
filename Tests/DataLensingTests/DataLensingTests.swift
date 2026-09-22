@@ -833,6 +833,10 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
     #expect(try AnalysisDocument(jsonData: legacyData).schemaVersion == AnalysisDocument.currentSchemaVersion)
 
+    legacyObject["schemaVersion"] = 3
+    let versionThreeData = try JSONSerialization.data(withJSONObject: legacyObject)
+    #expect(try AnalysisDocument(jsonData: versionThreeData).schemaVersion == AnalysisDocument.currentSchemaVersion)
+
     var futureObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
     futureObject["schemaVersion"] = 99
     let futureData = try JSONSerialization.data(withJSONObject: futureObject)
@@ -1105,9 +1109,79 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let fit = try AnalysisDocumentExecutor.fitAdvanced(
         document: document, sourceURL: url, modelBlockID: block.id
     )
+    let evidence = try AnalysisDocumentExecutor.advancedEvidenceSnapshot(document: document, fit: fit)
     #expect(fit.model.kind == StatisticalModelKind.multivariateGaussian)
     #expect(fit.solverBackend == MultivariateSolverBackend.denseQR)
+    #expect(evidence.requestedSolverPreference == .denseQR)
+    #expect(evidence.solverBackend == .denseQR)
+    #expect(evidence.sparseExecution == nil)
     #expect(fit.sourceRows == Array(0..<42))
+}
+
+@Test func advancedDocumentRecordsNativeSparseExecutionEvidence() throws {
+    let levels = Array(0..<8)
+    var rows: [String] = []
+    for first in levels {
+        for second in levels {
+            for third in levels {
+                let response = 1 + 0.25 * Double(first) - 0.1 * Double(second) + 0.05 * Double(third)
+                rows.append("\(first),\(second),\(third),\(response)")
+            }
+        }
+    }
+    let url = try scratchCSV("a,b,c,y\n" + rows.joined(separator: "\n") + "\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let terms: [MultivariateTermSpecification] = (0..<3).map {
+        .categorical(.init(predictorIndex: $0, levels: levels, referenceLevel: 0))
+    }
+    let multivariate = MultivariateModelSpecification(
+        terms: terms, penaltyWeight: 0.1, solverPreference: .sparseCGLS,
+        maxIterations: 40, tolerance: 1e-8
+    )
+    let specification = StatisticalModelSpecification(
+        strategy: .multivariateGaussian, multivariate: multivariate
+    )
+    let recipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["a", "b", "c"], responseColumn: "y", specification: specification,
+        validationConfiguration: ValidationConfiguration(
+            foldCount: 2, partitioning: .blocked, specification: specification
+        )
+    )
+    let block = try AnalysisDocument.Block(title: "Sparse factors", payload: .advancedModel(recipe))
+    let document = try AnalysisDocument(title: "Sparse", source: source, blocks: [block])
+    let fit = try AnalysisDocumentExecutor.fitAdvanced(
+        document: document, sourceURL: url, modelBlockID: block.id
+    )
+    let evidence = try AnalysisDocumentExecutor.advancedEvidenceSnapshot(document: document, fit: fit)
+    let sparse = try #require(evidence.sparseExecution)
+    #expect(evidence.requestedSolverPreference == .sparseCGLS)
+    #expect(evidence.solverBackend == .sparseCGLS)
+    #expect(sparse.converged)
+    #expect(sparse.designRows == rows.count)
+    #expect(sparse.designColumns == 22)
+    #expect(sparse.nonZeroCount < sparse.designRows * sparse.designColumns / 4)
+    #expect(sparse.iterations > 0 && sparse.normalResidualNorm.isFinite)
+
+    let evidenceBlock = try AnalysisDocument.Block(
+        title: "Sparse numerical evidence", upstreamBlockIDs: [block.id],
+        payload: .advancedEvidence(evidence)
+    )
+    var savedDocument = document
+    try savedDocument.append(evidenceBlock)
+    #expect(try AnalysisDocument(jsonData: savedDocument.jsonData()) == savedDocument)
+
+    var legacyEvidence = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(evidence)) as? [String: Any]
+    )
+    legacyEvidence.removeValue(forKey: "requestedSolverPreference")
+    legacyEvidence.removeValue(forKey: "sparseExecution")
+    let legacyEvidenceData = try JSONSerialization.data(withJSONObject: legacyEvidence)
+    let migratedEvidence = try JSONDecoder().decode(
+        AnalysisDocument.AdvancedModelEvidence.self, from: legacyEvidenceData
+    )
+    #expect(migratedEvidence.requestedSolverPreference == nil)
+    #expect(migratedEvidence.sparseExecution == nil)
 }
 
 @Test func validationWorkbenchUsesOutOfFoldPredictionsAndSourceRows() async throws {

@@ -13,12 +13,12 @@ let package = Package(
         .executable(name: "data-lensing-app", targets: ["DataLensingApp"]),
     ],
     dependencies: [
-        // Swift-DataLens 0.19.x adds unified GAM/multivariate model contracts,
-        // calibration/stability evidence, and sparse-solver provenance.
+        // Swift-DataLens 0.20.x adds basis-native CSR CGLS execution and
+        // durable sparse numerical provenance for notebook evidence.
         // Keep DataLensing on tagged compatible releases; source-head
         // compatibility is covered separately in CI.
         .package(url: "https://github.com/hakkabon/Swift-DataLens.git",
-                 .upToNextMinor(from: "0.19.0")),
+                 .upToNextMinor(from: "0.20.0")),
     ],
     targets: [
         .target(
