@@ -119,6 +119,24 @@ private enum ValidationPlanIntentChoice: String, CaseIterable, Identifiable {
     }
 }
 
+private enum AdvancedScaleChoice: String, CaseIterable, Identifiable {
+    case full = "Full finite data"
+    case bounded25k = "Bounded 25k stratified"
+    case bounded100k = "Bounded 100k stratified"
+
+    var id: String { rawValue }
+
+    var needsSeed: Bool { self != .full }
+
+    func policy(seed: UInt64) -> StatisticalScalePolicy {
+        switch self {
+        case .full: return .fullData
+        case .bounded25k: return .stratifiedLeadingPredictor(maximumObservations: 25_000, seed: seed)
+        case .bounded100k: return .stratifiedLeadingPredictor(maximumObservations: 100_000, seed: seed)
+        }
+    }
+}
+
 struct ContentView: View {
     private enum Phase {
         case idle
@@ -169,6 +187,8 @@ struct ContentView: View {
     @State private var figureCaption = ""
     @State private var advancedStrategy: AdvancedStrategyChoice = .gaussianGAM
     @State private var advancedSolver: MultivariateSolverPreference = .automatic
+    @State private var advancedScale: AdvancedScaleChoice = .full
+    @State private var advancedScaleSeed = "0"
     @State private var advancedBootstrap = false
     @State private var validationPlanName = "Validation plan"
     @State private var validationPlanIntent: ValidationPlanIntentChoice = .orderedOrSpatial
@@ -444,6 +464,18 @@ struct ContentView: View {
                                 Text(choice.rawValue).tag(choice)
                             }
                         }
+                        Picker("Statistical scale", selection: $advancedScale) {
+                            ForEach(AdvancedScaleChoice.allCases) { choice in
+                                Text(choice.rawValue).tag(choice)
+                            }
+                        }
+                        if advancedScale.needsSeed {
+                            TextField("Scale-selection seed", text: $advancedScaleSeed)
+                                .font(.caption)
+                        }
+                        Text("Bounded fits preserve leading-predictor coverage and record their deterministic seed in the run.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         if advancedStrategy.requiresSecondPredictor {
                             Picker("Numerical solve", selection: $advancedSolver) {
                                 Text("Automatic").tag(MultivariateSolverPreference.automatic)
@@ -1198,9 +1230,10 @@ struct ContentView: View {
             let cohort = plan.comparisonCohort.map { "cohort \($0)" }
             return [plan.partitioning.rawValue, "\(plan.foldCount) folds", "seed \(plan.seed)", bootstrap, cohort]
                 .compactMap { $0 }.joined(separator: " · ")
-        case .model(let recipe): return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response)"
+        case .model(let recipe):
+            return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response) · \(scalePolicyDescription(recipe.effectiveScalePolicy))"
         case .advancedModel(let recipe):
-            return "\(recipe.specification.strategy.rawValue) · \(recipe.predictorColumns.joined(separator: ", ")) → \(recipe.responseColumn)"
+            return "\(recipe.specification.strategy.rawValue) · \(recipe.predictorColumns.joined(separator: ", ")) → \(recipe.responseColumn) · \(scalePolicyDescription(recipe.effectiveScalePolicy))"
         case .run(let run):
             let retained = run.retainedObservationCount.map { "\($0) retained" }
             let solver = run.requestedSolverPreference.map { "requested \($0.rawValue)" }
@@ -1208,8 +1241,11 @@ struct ContentView: View {
                 ? "raw source" : "\(run.transformationBlockIDs.count) transforms"
             let validationSeed = "validation seed \(run.validationSeed)"
             let bootstrapSeed = run.bootstrapSeed.map { "bootstrap seed \($0)" }
+            let scale = run.scaleSelection.map {
+                "\($0.selectedObservationCount)/\($0.eligibleObservationCount) selected"
+            }
             let failure = run.failureDescription
-            return [run.status.rawValue, retained, lineage, validationSeed, bootstrapSeed, solver, failure]
+            return [run.status.rawValue, retained, lineage, scale, validationSeed, bootstrapSeed, solver, failure]
                 .compactMap { $0 }.joined(separator: " · ")
         case .evidence(let evidence):
             return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"
@@ -1230,6 +1266,14 @@ struct ContentView: View {
                 .compactMap { $0 }.joined(separator: " · ")
         case .figure(let figure): return figure.caption
         case .note(let text): return text
+        }
+    }
+
+    private func scalePolicyDescription(_ policy: StatisticalScalePolicy) -> String {
+        switch policy {
+        case .fullData: return "full finite data"
+        case .stratifiedLeadingPredictor(let maximum, let seed):
+            return "≤\(maximum) stratified · seed \(seed)"
         }
     }
 
@@ -1386,7 +1430,7 @@ struct ContentView: View {
                 let runRecord = try AnalysisDocument.AnalysisRun.completed(
                     in: updated, modelBlockID: modelID,
                     retainedObservationCount: result.fit.sourceRows.count,
-                    startedAt: startedAt
+                    startedAt: startedAt, scaleSelection: result.fit.scaleSelection
                 )
                 let runBlock = try AnalysisDocument.Block(
                     title: "Recomputed analysis run", upstreamBlockIDs: [modelID], payload: .run(runRecord)
@@ -1504,6 +1548,15 @@ struct ContentView: View {
         guard plan?.supports(specification) ?? true else {
             throw AnalysisDocumentExecutionError.invalidModelRecipe
         }
+        let scaleSeed: UInt64
+        if advancedScale.needsSeed {
+            guard let parsed = UInt64(advancedScaleSeed.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw AnalysisDocumentExecutionError.invalidModelRecipe
+            }
+            scaleSeed = parsed
+        } else {
+            scaleSeed = 0
+        }
         let partitioning: ValidationPartitioning = strategy == .additiveBinomial
             || strategy == .multivariateBinomial ? .stratifiedBinary : .blocked
         let validation = plan?.validationConfiguration(for: specification)
@@ -1535,6 +1588,7 @@ struct ContentView: View {
         return try AnalysisDocument.AdvancedModelRecipe(
             predictorColumns: predictors, responseColumn: built.controller.yName,
             specification: specification, validationConfiguration: validation,
+            scalePolicy: advancedScale.policy(seed: scaleSeed),
             bootstrapConfiguration: bootstrap, stabilityQueries: query,
             validationPlanBlockID: plan == nil ? nil : selectedValidationPlanBlockID
         )
@@ -1570,7 +1624,7 @@ struct ContentView: View {
                     let runRecord = try AnalysisDocument.AnalysisRun.completed(
                         in: updated, modelBlockID: modelBlock.id,
                         retainedObservationCount: run.fit.sourceRows.count,
-                        startedAt: startedAt
+                        startedAt: startedAt, scaleSelection: run.fit.scaleSelection
                     )
                     let runBlock = try AnalysisDocument.Block(
                         title: "Advanced analysis run", upstreamBlockIDs: [modelBlock.id], payload: .run(runRecord)

@@ -236,6 +236,19 @@ readable as a statistical report while retaining the underlying replay graph.
 The next statistical layer is review-ready, paired model-comparison evidence
 tied to those frozen runs.
 
+## Scaled statistical workflows
+
+Display scaling and statistical scaling are deliberately separate. Dense chart
+samples continue to use lossless viewport min/max decimation, while an analysis
+recipe may now explicitly request a bounded statistical fit. The available
+bounded policy stratifies finite observations along the leading predictor and
+draws one deterministic observation per stratum; it preserves broad trend
+coverage while bounding smoother, GAM, validation, and bootstrap cost. It is
+not an implicit approximation: the recipe stores the policy and seed, and each
+completed run records input, finite-eligible, and selected counts. Full-data is
+the default. The viewer exposes 25k and 100k bounded policies for advanced
+models, alongside the full finite-data option.
+
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
 their shared solver fixture. Tagged backend releases can dispatch the same
@@ -293,7 +306,7 @@ and replay the recorded configuration. **Copy Workbench Session** is available
 from the sidebar and `⌘⇧W` on macOS.
 
 Swift package resolution uses compatible tagged release ranges:
-DataLensing consumes Swift-DataLens `0.20.x`, which in turn resolves its
+DataLensing consumes Swift-DataLens `0.20.1`, which in turn resolves its
 compatible Swift-NumericCore release. The ecosystem compatibility workflow
 continues to exercise source-head integration separately from these stable
 consumer constraints.

@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     public let id: UUID
     public let schemaVersion: Int
@@ -282,6 +282,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let smoother: String
         public let tuning: WorkbenchTuning
         public let validationConfiguration: ValidationConfiguration
+        /// Explicit full-data or bounded-fit policy. `nil` decodes legacy
+        /// documents and is interpreted as `.fullData`.
+        public let scalePolicy: StatisticalScalePolicy?
         /// The first-class plan from which this exact configuration was resolved.
         public let validationPlanBlockID: UUID?
 
@@ -289,13 +292,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             predictor: String, response: String, secondPredictor: String? = nil,
             smoother: SmootherChoice, tuning: WorkbenchTuning,
             validationConfiguration: ValidationConfiguration,
+            scalePolicy: StatisticalScalePolicy = .fullData,
             validationPlanBlockID: UUID? = nil
         ) throws {
             guard Self.isValidColumnName(predictor), Self.isValidColumnName(response),
                   predictor != response,
                   secondPredictor.map(Self.isValidColumnName) ?? true,
                   secondPredictor != predictor, secondPredictor != response,
-                  tuning.isValid else {
+                  tuning.isValid, scalePolicy.isValid else {
                 throw AnalysisDocumentError.invalidConfiguration
             }
             self.predictor = predictor
@@ -304,6 +308,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             self.smoother = smoother.rawValue
             self.tuning = tuning
             self.validationConfiguration = validationConfiguration
+            self.scalePolicy = scalePolicy
             self.validationPlanBlockID = validationPlanBlockID
         }
 
@@ -316,12 +321,13 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
 
         public var smootherChoice: SmootherChoice? { SmootherChoice(rawValue: smoother) }
+        public var effectiveScalePolicy: StatisticalScalePolicy { scalePolicy ?? .fullData }
 
         fileprivate var isValid: Bool {
             Self.isValidColumnName(predictor) && Self.isValidColumnName(response)
                 && predictor != response && secondPredictor.map(Self.isValidColumnName) != false
                 && secondPredictor != predictor && secondPredictor != response
-                && smootherChoice != nil && tuning.isValid
+                && smootherChoice != nil && tuning.isValid && (scalePolicy?.isValid ?? true)
         }
 
         private static func isValidColumnName(_ value: String) -> Bool {
@@ -341,6 +347,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let responseColumn: String
         public let specification: StatisticalModelSpecification
         public let validationConfiguration: ValidationConfiguration
+        /// Explicit full-data or bounded-fit policy. `nil` decodes legacy
+        /// documents and is interpreted as `.fullData`.
+        public let scalePolicy: StatisticalScalePolicy?
         /// The first-class plan from which validation/bootstrap policy was resolved.
         public let validationPlanBlockID: UUID?
         /// `nil` means stability resampling was intentionally not requested.
@@ -352,6 +361,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             predictorColumns: [String], responseColumn: String,
             specification: StatisticalModelSpecification,
             validationConfiguration: ValidationConfiguration,
+            scalePolicy: StatisticalScalePolicy = .fullData,
             bootstrapConfiguration: BootstrapConfiguration? = nil,
             stabilityQueries: [[Double]] = [], validationPlanBlockID: UUID? = nil
         ) throws {
@@ -361,6 +371,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                   Self.isValidColumnName(responseColumn),
                   !predictorColumns.contains(responseColumn),
                   validationConfiguration.specification == specification,
+                  scalePolicy.isValid,
                   bootstrapConfiguration?.specification == specification || bootstrapConfiguration == nil,
                   stabilityQueries.allSatisfy({
                       $0.count == predictorColumns.count && $0.allSatisfy(\.isFinite)
@@ -372,6 +383,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             self.responseColumn = responseColumn
             self.specification = specification
             self.validationConfiguration = validationConfiguration
+            self.scalePolicy = scalePolicy
             self.validationPlanBlockID = validationPlanBlockID
             self.bootstrapConfiguration = bootstrapConfiguration
             self.stabilityQueries = stabilityQueries
@@ -382,12 +394,15 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 && predictorColumns.allSatisfy(Self.isValidColumnName)
                 && Self.isValidColumnName(responseColumn) && !predictorColumns.contains(responseColumn)
                 && validationConfiguration.specification == specification
+                && (scalePolicy?.isValid ?? true)
                 && (bootstrapConfiguration == nil || bootstrapConfiguration?.specification == specification)
                 && stabilityQueries.allSatisfy {
                     $0.count == predictorColumns.count && $0.allSatisfy(\.isFinite)
                 }
                 && (bootstrapConfiguration == nil || !stabilityQueries.isEmpty)
         }
+
+        public var effectiveScalePolicy: StatisticalScalePolicy { scalePolicy ?? .fullData }
 
         private static func isValidColumnName(_ value: String) -> Bool {
             !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -530,6 +545,13 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             guard case .advancedModel(let recipe) = self else { return nil }
             return recipe.specification.multivariate?.solverPreference
         }
+
+        fileprivate var scalePolicy: StatisticalScalePolicy {
+            switch self {
+            case .model(let recipe): return recipe.effectiveScalePolicy
+            case .advancedModel(let recipe): return recipe.effectiveScalePolicy
+            }
+        }
     }
 
     /// A reproducible, immutable analysis run.
@@ -547,6 +569,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let validationSeed: UInt64
         public let bootstrapSeed: UInt64?
         public let requestedSolverPreference: MultivariateSolverPreference?
+        /// Observed scale selection. `nil` remains readable for older runs.
+        public let scaleSelection: StatisticalScaleSelection?
         public let startedAt: Date
         public let completedAt: Date
         public let status: AnalysisRunStatus
@@ -559,7 +583,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             sourceFingerprint: String, modelBlockID: UUID,
             transformationBlockIDs: [UUID], recipe: AnalysisRunRecipe,
             startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
-            retainedObservationCount: Int? = nil, failureDescription: String? = nil
+            retainedObservationCount: Int? = nil, failureDescription: String? = nil,
+            scaleSelection: StatisticalScaleSelection? = nil
         ) throws {
             let validFailure: Bool
             switch status {
@@ -583,6 +608,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             validationSeed = recipe.validationSeed
             bootstrapSeed = recipe.bootstrapSeed
             requestedSolverPreference = recipe.requestedSolverPreference
+            self.scaleSelection = scaleSelection
             self.startedAt = startedAt
             self.completedAt = completedAt
             self.status = status
@@ -596,7 +622,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                   !transformationBlockIDs.contains(modelBlockID), completedAt >= startedAt,
                   validationSeed == recipe.validationSeed,
                   bootstrapSeed == recipe.bootstrapSeed,
-                  requestedSolverPreference == recipe.requestedSolverPreference else { return false }
+                  requestedSolverPreference == recipe.requestedSolverPreference,
+                  scaleSelection?.isValid ?? true,
+                  scaleSelection.map({ $0.policy == recipe.scalePolicy }) ?? true else { return false }
             switch status {
             case .completed:
                 return retainedObservationCount.map { $0 >= 0 } ?? false
@@ -610,12 +638,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         /// Capture a successful fit as a self-contained run snapshot.
         public static func completed(
             in document: AnalysisDocument, modelBlockID: UUID,
-            retainedObservationCount: Int, startedAt: Date, completedAt: Date = Date()
+            retainedObservationCount: Int, startedAt: Date, completedAt: Date = Date(),
+            scaleSelection: StatisticalScaleSelection? = nil
         ) throws -> AnalysisRun {
             try make(
                 in: document, modelBlockID: modelBlockID, startedAt: startedAt,
                 completedAt: completedAt, status: .completed,
-                retainedObservationCount: retainedObservationCount, failureDescription: nil
+                retainedObservationCount: retainedObservationCount, failureDescription: nil,
+                scaleSelection: scaleSelection
             )
         }
 
@@ -627,14 +657,16 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             try make(
                 in: document, modelBlockID: modelBlockID, startedAt: startedAt,
                 completedAt: completedAt, status: .failed,
-                retainedObservationCount: nil, failureDescription: description
+                retainedObservationCount: nil, failureDescription: description,
+                scaleSelection: nil
             )
         }
 
         private static func make(
             in document: AnalysisDocument, modelBlockID: UUID,
             startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
-            retainedObservationCount: Int?, failureDescription: String?
+            retainedObservationCount: Int?, failureDescription: String?,
+            scaleSelection: StatisticalScaleSelection?
         ) throws -> AnalysisRun {
             guard let recipe = document.runRecipe(for: modelBlockID) else {
                 throw AnalysisDocumentError.invalidDependency(modelBlockID)
@@ -644,7 +676,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 transformationBlockIDs: document.transformationAncestors(of: modelBlockID),
                 recipe: recipe, startedAt: startedAt, completedAt: completedAt,
                 status: status, retainedObservationCount: retainedObservationCount,
-                failureDescription: failureDescription
+                failureDescription: failureDescription, scaleSelection: scaleSelection
             )
         }
     }
@@ -1105,9 +1137,10 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // predates native sparse-execution evidence; version 4 predates
         // explicit immutable run records; version 5 predates reusable
         // validation-plan blocks and optional model-plan links; version 6
-        // predates composition sections. Existing representation is unchanged,
-        // so normalize on open and write the upgraded schema only when the
-        // host later saves.
+        // predates composition sections; version 7 predates explicit scaled
+        // fit policy and observed scale selection. Existing representation is
+        // unchanged, so normalize on open and write the upgraded schema only
+        // when the host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }

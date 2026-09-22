@@ -13,16 +13,18 @@ public struct AnalysisDocumentFit: Sendable {
     public let loaded: LoadedChart
     /// Zero-based rows in the original CSV, parallel to `loaded.model.rawX`.
     public let sourceRows: [Int]
-    /// Zero-based CSV rows before the smoother drops missing model values.
+    /// Zero-based CSV rows entering the fit after deterministic scale selection.
     /// This lets a host retain correct provenance through later windowed fits.
     public let trainingSourceRows: [Int]
+    /// Observed input, eligible, and selected counts for this fit.
+    public let scaleSelection: StatisticalScaleSelection
     public let columns: [ColumnInfo]
     public let transformedObservationCount: Int
 
     public init(
         modelBlockID: UUID, controller: FitController, loaded: LoadedChart,
         sourceRows: [Int], trainingSourceRows: [Int], columns: [ColumnInfo],
-        transformedObservationCount: Int
+        transformedObservationCount: Int, scaleSelection: StatisticalScaleSelection
     ) {
         self.modelBlockID = modelBlockID
         self.controller = controller
@@ -31,6 +33,7 @@ public struct AnalysisDocumentFit: Sendable {
         self.trainingSourceRows = trainingSourceRows
         self.columns = columns
         self.transformedObservationCount = transformedObservationCount
+        self.scaleSelection = scaleSelection
     }
 }
 
@@ -41,8 +44,10 @@ public struct AdvancedAnalysisDocumentFit: Sendable {
     public let model: FittedStatisticalModel
     /// Original CSV rows, parallel to the model's retained training rows.
     public let sourceRows: [Int]
-    /// Original CSV rows before the model's missing-data handling.
+    /// Original CSV rows entering the fit after deterministic scale selection.
     public let trainingSourceRows: [Int]
+    /// Observed input, eligible, and selected counts for this fit.
+    public let scaleSelection: StatisticalScaleSelection
     /// The actual accepted multivariate solver, never inferred from preference.
     public let solverBackend: MultivariateSolverBackend?
     /// The saved numerical policy requested for a multivariate fit.
@@ -56,7 +61,7 @@ public struct AdvancedAnalysisDocumentFit: Sendable {
         model: FittedStatisticalModel, sourceRows: [Int], trainingSourceRows: [Int],
         solverBackend: MultivariateSolverBackend?,
         requestedSolverPreference: MultivariateSolverPreference?,
-        sparseExecution: SparseExecutionEvidence?
+        sparseExecution: SparseExecutionEvidence?, scaleSelection: StatisticalScaleSelection
     ) {
         self.modelBlockID = modelBlockID
         self.recipe = recipe
@@ -66,6 +71,7 @@ public struct AdvancedAnalysisDocumentFit: Sendable {
         self.solverBackend = solverBackend
         self.requestedSolverPreference = requestedSolverPreference
         self.sparseExecution = sparseExecution
+        self.scaleSelection = scaleSelection
     }
 }
 
@@ -102,18 +108,29 @@ public enum AnalysisDocumentExecutor {
             throw AnalysisDocumentExecutionError.missingNumericColumn(recipe.response)
         }
         try Task.checkCancellation()
-
+        let predictors = xs.map { [$0] }
+        let selection = try recipe.effectiveScalePolicy.select(
+            predictors: predictors, response: ys
+        )
+        let selectedPredictors = selection.selectedIndices.map { predictors[$0] }
+        let selectedResponse = selection.selectedIndices.map { ys[$0] }
+        let selectedSourceRows = try selection.selectedIndices.map { index -> Int in
+            guard replay.table.sourceRowIndices.indices.contains(index) else {
+                throw AnalysisDocumentExecutionError.invalidProvenance
+            }
+            return replay.table.sourceRowIndices[index]
+        }
         var controller = FitController(
-            trainX: xs.map { [$0] }, trainY: ys, xName: recipe.predictor,
+            trainX: selectedPredictors, trainY: selectedResponse, xName: recipe.predictor,
             yName: recipe.response, budget: recipe.tuning.tuningBudget, smoother: smoother
         )
         let loaded = try await controller.fitConcurrently()
         try Task.checkCancellation()
         let sourceRows = try loaded.keptIndices.map { index -> Int in
-            guard replay.table.sourceRowIndices.indices.contains(index) else {
+            guard selectedSourceRows.indices.contains(index) else {
                 throw AnalysisDocumentExecutionError.invalidProvenance
             }
-            return replay.table.sourceRowIndices[index]
+            return selectedSourceRows[index]
         }
         let columns = replay.table.columns.map { column in
             let isNumeric: Bool
@@ -126,8 +143,8 @@ public enum AnalysisDocumentExecutor {
         }
         return AnalysisDocumentFit(
             modelBlockID: modelBlockID, controller: controller, loaded: loaded,
-            sourceRows: sourceRows, trainingSourceRows: replay.table.sourceRowIndices, columns: columns,
-            transformedObservationCount: replay.table.rowCount
+            sourceRows: sourceRows, trainingSourceRows: selectedSourceRows, columns: columns,
+            transformedObservationCount: replay.table.rowCount, scaleSelection: selection
         )
     }
 
@@ -159,6 +176,17 @@ public enum AnalysisDocumentExecutor {
             throw AnalysisDocumentExecutionError.invalidProvenance
         }
         let predictors = response.indices.map { row in predictorColumns.map { $0[row] } }
+        let selection = try recipe.effectiveScalePolicy.select(
+            predictors: predictors, response: response
+        )
+        let selectedPredictors = selection.selectedIndices.map { predictors[$0] }
+        let selectedResponse = selection.selectedIndices.map { response[$0] }
+        let selectedSourceRows = try selection.selectedIndices.map { index -> Int in
+            guard replay.table.sourceRowIndices.indices.contains(index) else {
+                throw AnalysisDocumentExecutionError.invalidProvenance
+            }
+            return replay.table.sourceRowIndices[index]
+        }
 
         let fitted: FittedStatisticalModel
         let solverBackend: MultivariateSolverBackend?
@@ -174,7 +202,7 @@ public enum AnalysisDocumentExecutor {
             default: preconditionFailure("Covered by the enclosing switch")
             }
             guard let multivariate = MultivariateModel.fit(
-                trainX: predictors, trainY: response, family: family,
+                trainX: selectedPredictors, trainY: selectedResponse, family: family,
                 specification: recipe.specification.multivariate ?? MultivariateModelSpecification(),
                 droppingMissing: true
             ).model else {
@@ -188,7 +216,7 @@ public enum AnalysisDocumentExecutor {
             sparseExecution = multivariate.sparseExecution
         default:
             guard let model = FittedStatisticalModel.fit(
-                trainX: predictors, trainY: response, specification: recipe.specification
+                trainX: selectedPredictors, trainY: selectedResponse, specification: recipe.specification
             ) else {
                 throw AnalysisDocumentExecutionError.fitFailed
             }
@@ -198,17 +226,17 @@ public enum AnalysisDocumentExecutor {
             sparseExecution = nil
         }
         let sourceRows = try fitted.keptIndices.map { index -> Int in
-            guard replay.table.sourceRowIndices.indices.contains(index) else {
+            guard selectedSourceRows.indices.contains(index) else {
                 throw AnalysisDocumentExecutionError.invalidProvenance
             }
-            return replay.table.sourceRowIndices[index]
+            return selectedSourceRows[index]
         }
         return AdvancedAnalysisDocumentFit(
             modelBlockID: modelBlockID, recipe: recipe, model: fitted,
-            sourceRows: sourceRows, trainingSourceRows: replay.table.sourceRowIndices,
+            sourceRows: sourceRows, trainingSourceRows: selectedSourceRows,
             solverBackend: solverBackend,
             requestedSolverPreference: requestedSolverPreference,
-            sparseExecution: sparseExecution
+            sparseExecution: sparseExecution, scaleSelection: selection
         )
     }
 

@@ -1118,6 +1118,55 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocumentExecutor.workbenchInput(document: document, fit: fit).sourceRows == [0, 2, 3])
 }
 
+@Test func scaledStatisticalWorkflowsUseDeterministicStratifiedFitsAndRecordSelection() async throws {
+    let predictors = (0..<101).map { [Double($0)] }
+    let response = (0..<101).map { Double($0 * $0) }
+    let policy = StatisticalScalePolicy.stratifiedLeadingPredictor(maximumObservations: 10, seed: 41)
+    let first = try policy.select(predictors: predictors, response: response)
+    let second = try policy.select(predictors: predictors, response: response)
+    #expect(first == second)
+    #expect(first.inputObservationCount == 101)
+    #expect(first.eligibleObservationCount == 101)
+    #expect(first.selectedObservationCount == 10)
+    #expect(first.reduced)
+    #expect(first.selectedIndices == first.selectedIndices.sorted())
+    #expect(first.selectedIndices.first! < 11)
+    #expect(first.selectedIndices.last! > 89)
+
+    let rows = (0..<80).map { index in "\(index),\(Double(index) + sin(Double(index) / 4))" }
+    let url = try scratchCSV("x,y\n" + rows.joined(separator: "\n") + "\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let recipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: ValidationConfiguration(),
+        scalePolicy: .stratifiedLeadingPredictor(maximumObservations: 12, seed: 9)
+    )
+    let model = try AnalysisDocument.Block(title: "Bounded trend", payload: .model(recipe))
+    var document = try AnalysisDocument(title: "Scaled workflow", source: source, blocks: [model])
+    let fit = try await AnalysisDocumentExecutor.fit(
+        document: document, sourceURL: url, modelBlockID: model.id
+    )
+    #expect(fit.scaleSelection.inputObservationCount == 80)
+    #expect(fit.scaleSelection.eligibleObservationCount == 80)
+    #expect(fit.scaleSelection.selectedObservationCount == 12)
+    #expect(fit.trainingSourceRows == fit.scaleSelection.selectedIndices)
+    #expect(fit.loaded.model.rawX.count == 12)
+
+    let run = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: model.id, retainedObservationCount: fit.sourceRows.count,
+        startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        completedAt: Date(timeIntervalSince1970: 1_700_000_001),
+        scaleSelection: fit.scaleSelection
+    )
+    #expect(run.scaleSelection == fit.scaleSelection)
+    let runBlock = try AnalysisDocument.Block(
+        title: "Bounded run", upstreamBlockIDs: [model.id], payload: .run(run)
+    )
+    try document.append(runBlock)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+}
+
 @Test func analysisRunsSnapshotInputsAndRemainAsStaleHistoricalRecords() throws {
     let url = try scratchCSV("x,y\n0,1\n1,3\n2,5\n")
     defer { try? FileManager.default.removeItem(at: url) }
