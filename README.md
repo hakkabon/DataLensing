@@ -233,8 +233,16 @@ viewer can generate a conservative Data & preparation / Models & validation /
 Results & interpretation outline, then lets reviewers add narrative, move
 sections, and place later uncomposed blocks explicitly. This makes a document
 readable as a statistical report while retaining the underlying replay graph.
-The next statistical layer is review-ready, paired model-comparison evidence
-tied to those frozen runs.
+
+Documents now also carry a portable review record: a user-entered display label,
+severity, optional target block, finding text, and an explicit resolution or
+dismissal rationale. This is deliberately file-based review readiness, not a
+claim of live collaboration or authenticated identity. A document can be marked
+ready only when it has analysis blocks, no stale blocks, and no open blockers;
+acceptance additionally requires every finding to be closed with a recorded
+outcome. Any execution or narrative edit returns the review state to draft, so
+a readiness badge cannot conceal changed inputs or unresolved feedback. The
+next statistical layer is paired model-comparison evidence tied to frozen runs.
 
 ## Scaled statistical workflows
 

@@ -830,6 +830,7 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
 
     var legacyObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
     legacyObject.removeValue(forKey: "composition")
+    legacyObject.removeValue(forKey: "review")
     legacyObject["schemaVersion"] = 1
     let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
     #expect(try AnalysisDocument(jsonData: legacyData).schemaVersion == AnalysisDocument.currentSchemaVersion)
@@ -843,6 +844,8 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let upgradedVersionSix = try AnalysisDocument(jsonData: versionSixData)
     #expect(upgradedVersionSix.schemaVersion == AnalysisDocument.currentSchemaVersion)
     #expect(upgradedVersionSix.composition.sections.isEmpty)
+    #expect(upgradedVersionSix.review.readiness == .draft)
+    #expect(upgradedVersionSix.review.findings.isEmpty)
 
     var futureObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
     futureObject["schemaVersion"] = 99
@@ -966,6 +969,59 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(throws: AnalysisDocumentError.invalidConfiguration) {
         _ = try AnalysisDocument(title: "Invalid composition", source: source, composition: danglingComposition)
     }
+}
+
+@Test func documentReviewMakesReadinessAndFindingResolutionAuditable() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,2\n2,4\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let recipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: ValidationConfiguration()
+    )
+    let model = try AnalysisDocument.Block(title: "Trend", payload: .model(recipe))
+    let figure = try AnalysisDocument.Block(
+        title: "Trend figure", upstreamBlockIDs: [model.id],
+        payload: .figure(try AnalysisDocument.FigureAnnotation(kind: .fittedCurve, caption: "Observed trend."))
+    )
+    var document = try AnalysisDocument(title: "Reviewed trend", source: source, blocks: [model, figure])
+
+    #expect(document.reviewSummary.canMarkReady)
+    try document.setReviewReadiness(.readyForReview)
+    #expect(document.review.readiness == .readyForReview)
+
+    let blockerID = try document.addReviewFinding(
+        author: "A. Reviewer", body: "Explain the boundary behavior.", targetBlockID: figure.id,
+        severity: .blocker
+    )
+    #expect(document.review.readiness == .draft)
+    #expect(document.reviewSummary.openFindingCount == 1)
+    #expect(document.reviewSummary.openBlockerCount == 1)
+    #expect(!document.reviewSummary.canMarkReady)
+    #expect(throws: AnalysisDocumentError.invalidConfiguration) {
+        try document.setReviewReadiness(.accepted)
+    }
+
+    try document.closeReviewFinding(
+        id: blockerID, as: .resolved, resolution: "Added a boundary-sensitivity note."
+    )
+    #expect(document.review.findings.first?.status == .resolved)
+    #expect(document.review.findings.first?.resolution == "Added a boundary-sensitivity note.")
+    try document.setReviewReadiness(.readyForReview)
+    try document.setReviewReadiness(.accepted)
+    #expect(document.review.readiness == .accepted)
+
+    _ = try document.update(blockID: model.id, payload: .model(recipe))
+    #expect(document.review.readiness == .draft)
+    #expect(document.blocks.first(where: { $0.id == figure.id })?.state == .stale)
+    #expect(document.reviewSummary.staleBlockCount == 1)
+    let missingBlockID = UUID()
+    #expect(throws: AnalysisDocumentError.invalidDependency(missingBlockID)) {
+        _ = try document.addReviewFinding(
+            author: "A. Reviewer", body: "Missing target.", targetBlockID: missingBlockID
+        )
+    }
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 
 @Test func replayableTransformationsPreserveSourceRowsAndDerivedValues() throws {

@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 9
 
     public let id: UUID
     public let schemaVersion: Int
@@ -24,10 +24,15 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     /// A review-oriented ordering of existing blocks. Composition never
     /// changes execution dependencies or freshness.
     public private(set) var composition: NotebookComposition
+    /// Portable review state for file sharing and version-controlled handoff.
+    /// It records comments and explicit readiness without claiming live identity,
+    /// synchronization, or external approval.
+    public private(set) var review: DocumentReview
 
     public init(
         id: UUID = UUID(), title: String, source: Source, blocks: [Block] = [],
         composition: NotebookComposition = NotebookComposition(),
+        review: DocumentReview = DocumentReview(),
         createdAt: Date = Date(), updatedAt: Date = Date()
     ) throws {
         self.id = id
@@ -36,6 +41,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         self.source = source
         self.blocks = blocks
         self.composition = composition
+        self.review = review
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         try validate()
@@ -924,14 +930,184 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A structured, portable review record for a statistical document.
+    ///
+    /// Review authors are display labels supplied by the person using the
+    /// document. They are provenance for a shared file, not authenticated
+    /// identities or a live-collaboration protocol.
+    public struct DocumentReview: Codable, Sendable, Hashable {
+        public enum Readiness: String, Codable, Sendable, Hashable {
+            case draft
+            case readyForReview
+            case accepted
+        }
+
+        public struct Finding: Codable, Sendable, Hashable, Identifiable {
+            public enum Severity: String, Codable, Sendable, Hashable, CaseIterable {
+                case note
+                case concern
+                case blocker
+            }
+
+            public enum Status: String, Codable, Sendable, Hashable {
+                case open
+                case resolved
+                case dismissed
+            }
+
+            public let id: UUID
+            /// A non-empty, user-entered display label; not an authenticated identity.
+            public let author: String
+            public let body: String
+            /// Nil denotes a document-level finding; a value names one saved block.
+            public let targetBlockID: UUID?
+            public let severity: Severity
+            public let createdAt: Date
+            public private(set) var status: Status
+            public private(set) var resolution: String?
+            public private(set) var resolvedAt: Date?
+
+            public init(
+                id: UUID = UUID(), author: String, body: String, targetBlockID: UUID? = nil,
+                severity: Severity = .concern, createdAt: Date = Date(),
+                status: Status = .open, resolution: String? = nil, resolvedAt: Date? = nil
+            ) throws {
+                let normalizedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalizedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalizedResolution = resolution?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedAuthor.isEmpty, !normalizedBody.isEmpty,
+                      normalizedResolution?.isEmpty != true,
+                      Self.hasValidClosure(
+                        status: status, resolution: normalizedResolution, resolvedAt: resolvedAt,
+                        createdAt: createdAt
+                      ) else {
+                    throw AnalysisDocumentError.invalidConfiguration
+                }
+                self.id = id
+                self.author = normalizedAuthor
+                self.body = normalizedBody
+                self.targetBlockID = targetBlockID
+                self.severity = severity
+                self.createdAt = createdAt
+                self.status = status
+                self.resolution = normalizedResolution
+                self.resolvedAt = resolvedAt
+            }
+
+            fileprivate mutating func close(
+                as status: Status, resolution: String, at date: Date
+            ) throws {
+                let normalized = resolution.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard self.status == .open, status != .open, !normalized.isEmpty, date >= createdAt else {
+                    throw AnalysisDocumentError.invalidConfiguration
+                }
+                self.status = status
+                self.resolution = normalized
+                resolvedAt = date
+            }
+
+            fileprivate var isValid: Bool {
+                !author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && resolution?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true
+                    && Self.hasValidClosure(
+                        status: status, resolution: resolution, resolvedAt: resolvedAt,
+                        createdAt: createdAt
+                    )
+            }
+
+            private static func hasValidClosure(
+                status: Status, resolution: String?, resolvedAt: Date?, createdAt: Date
+            ) -> Bool {
+                switch status {
+                case .open: return resolution == nil && resolvedAt == nil
+                case .resolved, .dismissed:
+                    return resolution != nil && resolvedAt.map { $0 >= createdAt } == true
+                }
+            }
+        }
+
+        public private(set) var readiness: Readiness
+        public private(set) var findings: [Finding]
+
+        public init() {
+            readiness = .draft
+            findings = []
+        }
+
+        public init(readiness: Readiness, findings: [Finding]) throws {
+            guard Self.isValid(findings) else { throw AnalysisDocumentError.invalidConfiguration }
+            self.readiness = readiness
+            self.findings = findings
+        }
+
+        public var openFindings: [Finding] { findings.filter { $0.status == .open } }
+        public var openBlockerCount: Int {
+            openFindings.filter { $0.severity == .blocker }.count
+        }
+
+        fileprivate mutating func append(_ finding: Finding) throws {
+            guard !findings.contains(where: { $0.id == finding.id }) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            findings.append(finding)
+            readiness = .draft
+        }
+
+        fileprivate mutating func close(
+            findingID: UUID, as status: Finding.Status, resolution: String, at date: Date
+        ) throws {
+            guard let index = findings.firstIndex(where: { $0.id == findingID }) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            try findings[index].close(as: status, resolution: resolution, at: date)
+            readiness = .draft
+        }
+
+        fileprivate mutating func setReadiness(_ readiness: Readiness) {
+            self.readiness = readiness
+        }
+
+        fileprivate mutating func resetReadiness() {
+            if readiness != .draft { readiness = .draft }
+        }
+
+        fileprivate var isValid: Bool { Self.isValid(findings) }
+
+        private static func isValid(_ findings: [Finding]) -> Bool {
+            Set(findings.map(\.id)).count == findings.count && findings.allSatisfy(\.isValid)
+        }
+    }
+
+    /// A computed audit summary. It does not silently promote a document's
+    /// readiness: callers must explicitly set the corresponding review state.
+    public struct ReviewSummary: Sendable, Hashable {
+        public let readiness: DocumentReview.Readiness
+        public let staleBlockCount: Int
+        public let openFindingCount: Int
+        public let openBlockerCount: Int
+        public let hasAnalysisBlocks: Bool
+
+        public var canMarkReady: Bool {
+            hasAnalysisBlocks && staleBlockCount == 0 && openBlockerCount == 0
+        }
+
+        public var canAccept: Bool { canMarkReady && openFindingCount == 0 }
+    }
+
     /// Append a block after its dependencies. No result is recomputed implicitly.
     public mutating func append(_ block: Block, at date: Date = Date()) throws {
+        let previousReview = review
+        let previousUpdatedAt = updatedAt
         blocks.append(block)
+        review.resetReadiness()
         updatedAt = date
         do {
             try validate()
         } catch {
             blocks.removeLast()
+            review = previousReview
+            updatedAt = previousUpdatedAt
             throw error
         }
     }
@@ -951,6 +1127,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             state: .current, createdAt: blocks[index].createdAt, updatedAt: date
         )
         let stale = markDownstreamStale(of: blockID, at: date)
+        review.resetReadiness()
         updatedAt = date
         try validate()
         return stale
@@ -963,6 +1140,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         self.source = source
         let stale = Set(blocks.map(\.id))
         for index in blocks.indices { blocks[index].markStale(at: date) }
+        review.resetReadiness()
         updatedAt = date
         try validate()
         return stale
@@ -1030,11 +1208,91 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         return blocks.filter { !assigned.contains($0.id) }
     }
 
+    /// Review status is deliberately separate from execution freshness. This
+    /// summary exposes both so a visual "ready" badge cannot hide stale work
+    /// or an unresolved blocker.
+    public var reviewSummary: ReviewSummary {
+        let staleBlockCount = blocks.filter { $0.state == .stale }.count
+        return ReviewSummary(
+            readiness: review.readiness, staleBlockCount: staleBlockCount,
+            openFindingCount: review.openFindings.count,
+            openBlockerCount: review.openBlockerCount,
+            hasAnalysisBlocks: !blocks.isEmpty
+        )
+    }
+
+    /// Add a portable review finding. A finding may be document-level or
+    /// attached to one stable notebook block; it cannot target an unknown ID.
+    @discardableResult
+    public mutating func addReviewFinding(
+        author: String, body: String, targetBlockID: UUID? = nil,
+        severity: DocumentReview.Finding.Severity = .concern, at date: Date = Date()
+    ) throws -> UUID {
+        guard targetBlockID.map({ id in blocks.contains(where: { $0.id == id }) }) ?? true else {
+            throw AnalysisDocumentError.invalidDependency(targetBlockID!)
+        }
+        let finding = try DocumentReview.Finding(
+            author: author, body: body, targetBlockID: targetBlockID,
+            severity: severity, createdAt: date
+        )
+        let previousReview = review
+        let previousUpdatedAt = updatedAt
+        do {
+            try review.append(finding)
+            updatedAt = date
+            try validate()
+            return finding.id
+        } catch {
+            review = previousReview
+            updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
+    /// Close one finding with an explicit, durable explanation. Resolving and
+    /// dismissing are intentionally distinct audit outcomes.
+    public mutating func closeReviewFinding(
+        id: UUID, as status: DocumentReview.Finding.Status, resolution: String,
+        at date: Date = Date()
+    ) throws {
+        let previousReview = review
+        let previousUpdatedAt = updatedAt
+        do {
+            try review.close(findingID: id, as: status, resolution: resolution, at: date)
+            updatedAt = date
+            try validate()
+        } catch {
+            review = previousReview
+            updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
+    /// Explicitly state the document's review milestone. A ready document has
+    /// no stale blocks or open blockers; acceptance additionally requires all
+    /// findings to have a recorded terminal outcome.
+    public mutating func setReviewReadiness(
+        _ readiness: DocumentReview.Readiness, at date: Date = Date()
+    ) throws {
+        let previousReview = review
+        let previousUpdatedAt = updatedAt
+        review.setReadiness(readiness)
+        updatedAt = date
+        do {
+            try validate()
+        } catch {
+            review = previousReview
+            updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
     /// Generate a conservative, review-ready outline from current block kinds.
     /// Existing custom composition is never overwritten implicitly.
     public mutating func createInitialComposition(at date: Date = Date()) throws {
         guard composition.sections.isEmpty else { throw AnalysisDocumentError.invalidConfiguration }
         composition = try NotebookComposition.initialOutline(for: blocks)
+        review.resetReadiness()
         updatedAt = date
         try validate()
     }
@@ -1044,6 +1302,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         title: String, narrative: String = "", at date: Date = Date()
     ) throws -> UUID {
         let sectionID = try composition.appendSection(title: title, narrative: narrative)
+        review.resetReadiness()
         updatedAt = date
         try validate()
         return sectionID
@@ -1053,6 +1312,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         id: UUID, title: String, narrative: String, at date: Date = Date()
     ) throws {
         try composition.updateSection(id: id, title: title, narrative: narrative)
+        review.resetReadiness()
         updatedAt = date
         try validate()
     }
@@ -1061,6 +1321,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         id: UUID, to destinationIndex: Int, at date: Date = Date()
     ) throws {
         try composition.moveSection(id: id, to: destinationIndex)
+        review.resetReadiness()
         updatedAt = date
         try validate()
     }
@@ -1073,6 +1334,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             throw AnalysisDocumentError.invalidDependency(blockID)
         }
         try composition.assign(blockID: blockID, to: sectionID)
+        review.resetReadiness()
         updatedAt = date
         try validate()
     }
@@ -1116,7 +1378,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, schemaVersion, title, source, createdAt, updatedAt, blocks, composition
+        case id, schemaVersion, title, source, createdAt, updatedAt, blocks, composition, review
     }
 
     public init(from decoder: Decoder) throws {
@@ -1130,6 +1392,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         blocks = try values.decode([Block].self, forKey: .blocks)
         composition = try values.decodeIfPresent(NotebookComposition.self, forKey: .composition)
             ?? NotebookComposition()
+        review = try values.decodeIfPresent(DocumentReview.self, forKey: .review)
+            ?? DocumentReview()
         guard (1...Self.currentSchemaVersion).contains(decodedSchemaVersion) else {
             throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
@@ -1138,7 +1402,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // explicit immutable run records; version 5 predates reusable
         // validation-plan blocks and optional model-plan links; version 6
         // predates composition sections; version 7 predates explicit scaled
-        // fit policy and observed scale selection. Existing representation is
+        // fit policy and observed scale selection; version 8 predates portable
+        // review findings and explicit readiness. Existing representation is
         // unchanged, so normalize on open and write the upgraded schema only
         // when the host later saves.
         schemaVersion = Self.currentSchemaVersion
@@ -1167,8 +1432,23 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
               source.isValid,
               Set(blocks.map(\.id)).count == blocks.count,
               composition.isValid,
-              Set(composition.blockIDs).isSubset(of: Set(blocks.map(\.id))) else {
+              Set(composition.blockIDs).isSubset(of: Set(blocks.map(\.id))),
+              review.isValid,
+              Set(review.findings.compactMap(\.targetBlockID)).isSubset(of: Set(blocks.map(\.id))) else {
             throw AnalysisDocumentError.invalidConfiguration
+        }
+        let summary = reviewSummary
+        switch review.readiness {
+        case .draft:
+            break
+        case .readyForReview:
+            guard summary.canMarkReady else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+        case .accepted:
+            guard summary.canAccept else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
         }
         var preceding = Set<UUID>()
         for block in blocks {

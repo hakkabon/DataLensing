@@ -201,6 +201,12 @@ struct ContentView: View {
     @State private var compositionSectionNarrative = ""
     @State private var selectedCompositionSectionID: UUID?
     @State private var selectedUncomposedBlockID: UUID?
+    @State private var reviewAuthor = ""
+    @State private var reviewBody = ""
+    @State private var reviewSeverity: AnalysisDocument.DocumentReview.Finding.Severity = .concern
+    @State private var selectedReviewTargetBlockID: UUID?
+    @State private var selectedReviewFindingID: UUID?
+    @State private var reviewResolution = ""
     @State private var advancedTask: Task<Void, Never>?
     @State private var advancedLoading = false
 
@@ -444,6 +450,9 @@ struct ContentView: View {
                             compositionSectionRow(section, in: document)
                         }
                     }
+
+                    Divider()
+                    reviewPanel(for: document)
 
                     if case .ready(let built) = phase {
                         Button("Update Recipe from Visible Chart") {
@@ -1116,6 +1125,166 @@ struct ContentView: View {
             selectedUncomposedBlockID = nil
         } catch {
             documentError = String(describing: error)
+        }
+    }
+
+    private func addReviewFinding() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            let findingID = try document.addReviewFinding(
+                author: reviewAuthor, body: reviewBody,
+                targetBlockID: selectedReviewTargetBlockID, severity: reviewSeverity
+            )
+            analysisDocument = document
+            selectedReviewFindingID = findingID
+            reviewBody = ""
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func closeReviewFinding(as status: AnalysisDocument.DocumentReview.Finding.Status) {
+        guard var document = analysisDocument, let findingID = selectedReviewFindingID else { return }
+        documentError = nil
+        do {
+            try document.closeReviewFinding(id: findingID, as: status, resolution: reviewResolution)
+            analysisDocument = document
+            reviewResolution = ""
+            selectedReviewFindingID = nil
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func setReviewReadiness(_ readiness: AnalysisDocument.DocumentReview.Readiness) {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            try document.setReviewReadiness(readiness)
+            analysisDocument = document
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    @ViewBuilder
+    private func reviewPanel(for document: AnalysisDocument) -> some View {
+        let summary = document.reviewSummary
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Label("Review", systemImage: "person.2.badge.gearshape")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                reviewReadinessBadge(summary)
+            }
+            Text(
+                "(summary.openFindingCount) open findings · (summary.openBlockerCount) blockers · (summary.staleBlockCount) stale blocks"
+            )
+            .font(.caption2)
+            .foregroundStyle(summary.canMarkReady ? .secondary : .orange)
+            Text("Saved findings travel with this document; author labels are not authenticated identities or live collaboration.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            TextField("Reviewer label", text: $reviewAuthor)
+                .font(.caption)
+            TextField("Finding", text: $reviewBody)
+                .font(.caption)
+            Picker("Severity", selection: $reviewSeverity) {
+                ForEach(AnalysisDocument.DocumentReview.Finding.Severity.allCases, id: \.self) { severity in
+                    Text(severity.rawValue.capitalized).tag(severity)
+                }
+            }
+            Picker("Applies to", selection: $selectedReviewTargetBlockID) {
+                Text("Whole document").tag(UUID?.none)
+                ForEach(document.blocks) { block in
+                    Text(block.title).tag(Optional(block.id))
+                }
+            }
+            Button("Add Finding") { addReviewFinding() }
+                .font(.caption)
+                .disabled(
+                    documentRecomputing
+                        || reviewAuthor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || reviewBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+            HStack(spacing: 6) {
+                Button("Mark Ready") { setReviewReadiness(.readyForReview) }
+                    .disabled(documentRecomputing || !summary.canMarkReady)
+                Button("Accept") { setReviewReadiness(.accepted) }
+                    .disabled(documentRecomputing || !summary.canAccept)
+            }
+            .font(.caption)
+
+            if !document.review.findings.isEmpty {
+                Picker("Close finding", selection: $selectedReviewFindingID) {
+                    Text("Choose finding").tag(UUID?.none)
+                    ForEach(document.review.openFindings) { finding in
+                        Text(reviewFindingPickerTitle(finding, in: document)).tag(Optional(finding.id))
+                    }
+                }
+                .font(.caption)
+                TextField("Resolution or dismissal reason", text: $reviewResolution)
+                    .font(.caption)
+                HStack(spacing: 6) {
+                    Button("Resolve") { closeReviewFinding(as: .resolved) }
+                    Button("Dismiss") { closeReviewFinding(as: .dismissed) }
+                }
+                .font(.caption)
+                .disabled(
+                    selectedReviewFindingID == nil
+                        || reviewResolution.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                ForEach(document.review.findings) { finding in
+                    reviewFindingRow(finding, in: document)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func reviewReadinessBadge(_ summary: AnalysisDocument.ReviewSummary) -> some View {
+        let isAccepted = summary.readiness == .accepted
+        let isReady = summary.readiness == .readyForReview
+        Label(
+            isAccepted ? "Accepted" : (isReady ? "Ready" : "Draft"),
+            systemImage: isAccepted ? "checkmark.seal.fill" : (isReady ? "eye.fill" : "pencil.circle")
+        )
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(isAccepted ? .green : (isReady ? .blue : .secondary))
+    }
+
+    private func reviewFindingPickerTitle(
+        _ finding: AnalysisDocument.DocumentReview.Finding, in document: AnalysisDocument
+    ) -> String {
+        let target = finding.targetBlockID.flatMap { id in
+            document.blocks.first(where: { $0.id == id })?.title
+        } ?? "Document"
+        return "[(finding.severity.rawValue)] (target)"
+    }
+
+    @ViewBuilder
+    private func reviewFindingRow(
+        _ finding: AnalysisDocument.DocumentReview.Finding, in document: AnalysisDocument
+    ) -> some View {
+        let target = finding.targetBlockID.flatMap { id in
+            document.blocks.first(where: { $0.id == id })?.title
+        } ?? "Whole document"
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Text(finding.severity.rawValue.capitalized).font(.caption2.weight(.semibold))
+                    .foregroundStyle(finding.severity == .blocker ? .red : .secondary)
+                Text("· \(finding.status.rawValue) · \(target)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text(finding.body).font(.caption).lineLimit(2)
+            Text(finding.author).font(.caption2).foregroundStyle(.secondary)
+            if let resolution = finding.resolution {
+                Text("→ \(resolution)").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            }
         }
     }
 
