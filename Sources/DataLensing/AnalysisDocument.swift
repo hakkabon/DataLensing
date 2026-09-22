@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     public let id: UUID
     public let schemaVersion: Int
@@ -352,6 +352,154 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// The immutable outcome of one explicit analysis execution.
+    public enum AnalysisRunStatus: String, Codable, Sendable, Hashable {
+        case completed
+        case failed
+    }
+
+    /// A recipe snapshot attached to a run rather than inferred from a model
+    /// block at review time. This protects an analysis record from a later
+    /// model-block edit or from ambiguity about which validation plan ran.
+    public enum AnalysisRunRecipe: Codable, Sendable, Hashable {
+        case model(ModelRecipe)
+        case advancedModel(AdvancedModelRecipe)
+
+        fileprivate var validationSeed: UInt64 {
+            switch self {
+            case .model(let recipe): recipe.validationConfiguration.seed
+            case .advancedModel(let recipe): recipe.validationConfiguration.seed
+            }
+        }
+
+        fileprivate var bootstrapSeed: UInt64? {
+            guard case .advancedModel(let recipe) = self else { return nil }
+            return recipe.bootstrapConfiguration?.seed
+        }
+
+        fileprivate var requestedSolverPreference: MultivariateSolverPreference? {
+            guard case .advancedModel(let recipe) = self else { return nil }
+            return recipe.specification.multivariate?.solverPreference
+        }
+    }
+
+    /// A reproducible, immutable analysis run.
+    ///
+    /// A run has one direct model dependency and snapshots all execution
+    /// inputs: source fingerprint, transformation lineage, recipe, validation
+    /// and bootstrap seeds, and numerical policy. Result figures and evidence
+    /// depend on the run, never on a mutable notion of “latest result”.
+    public struct AnalysisRun: Codable, Sendable, Hashable {
+        public let sourceFingerprint: String
+        public let modelBlockID: UUID
+        /// Ordered transformation ancestors actually replayed for this model.
+        public let transformationBlockIDs: [UUID]
+        public let recipe: AnalysisRunRecipe
+        public let validationSeed: UInt64
+        public let bootstrapSeed: UInt64?
+        public let requestedSolverPreference: MultivariateSolverPreference?
+        public let startedAt: Date
+        public let completedAt: Date
+        public let status: AnalysisRunStatus
+        /// Retained rows for a completed fit; `nil` for a failed run.
+        public let retainedObservationCount: Int?
+        /// Human-readable terminal failure reason; absent for completed runs.
+        public let failureDescription: String?
+
+        public init(
+            sourceFingerprint: String, modelBlockID: UUID,
+            transformationBlockIDs: [UUID], recipe: AnalysisRunRecipe,
+            startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
+            retainedObservationCount: Int? = nil, failureDescription: String? = nil
+        ) throws {
+            let validFailure: Bool
+            switch status {
+            case .completed:
+                validFailure = retainedObservationCount != nil && retainedObservationCount! >= 0
+                    && failureDescription == nil
+            case .failed:
+                validFailure = retainedObservationCount == nil
+                    && !(failureDescription?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            }
+            guard !sourceFingerprint.isEmpty,
+                  Set(transformationBlockIDs).count == transformationBlockIDs.count,
+                  !transformationBlockIDs.contains(modelBlockID),
+                  completedAt >= startedAt, validFailure else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.sourceFingerprint = sourceFingerprint
+            self.modelBlockID = modelBlockID
+            self.transformationBlockIDs = transformationBlockIDs
+            self.recipe = recipe
+            validationSeed = recipe.validationSeed
+            bootstrapSeed = recipe.bootstrapSeed
+            requestedSolverPreference = recipe.requestedSolverPreference
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.status = status
+            self.retainedObservationCount = retainedObservationCount
+            self.failureDescription = failureDescription
+        }
+
+        fileprivate var isValid: Bool {
+            guard !sourceFingerprint.isEmpty,
+                  Set(transformationBlockIDs).count == transformationBlockIDs.count,
+                  !transformationBlockIDs.contains(modelBlockID), completedAt >= startedAt,
+                  validationSeed == recipe.validationSeed,
+                  bootstrapSeed == recipe.bootstrapSeed,
+                  requestedSolverPreference == recipe.requestedSolverPreference else { return false }
+            switch status {
+            case .completed:
+                return retainedObservationCount.map { $0 >= 0 } ?? false
+                    && failureDescription == nil
+            case .failed:
+                return retainedObservationCount == nil
+                    && !(failureDescription?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            }
+        }
+
+        /// Capture a successful fit as a self-contained run snapshot.
+        public static func completed(
+            in document: AnalysisDocument, modelBlockID: UUID,
+            retainedObservationCount: Int, startedAt: Date, completedAt: Date = Date()
+        ) throws -> AnalysisRun {
+            try make(
+                in: document, modelBlockID: modelBlockID, startedAt: startedAt,
+                completedAt: completedAt, status: .completed,
+                retainedObservationCount: retainedObservationCount, failureDescription: nil
+            )
+        }
+
+        /// Capture a terminal failure without disguising it as an absent run.
+        public static func failed(
+            in document: AnalysisDocument, modelBlockID: UUID, description: String,
+            startedAt: Date, completedAt: Date = Date()
+        ) throws -> AnalysisRun {
+            try make(
+                in: document, modelBlockID: modelBlockID, startedAt: startedAt,
+                completedAt: completedAt, status: .failed,
+                retainedObservationCount: nil, failureDescription: description
+            )
+        }
+
+        private static func make(
+            in document: AnalysisDocument, modelBlockID: UUID,
+            startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
+            retainedObservationCount: Int?, failureDescription: String?
+        ) throws -> AnalysisRun {
+            guard let recipe = document.runRecipe(for: modelBlockID) else {
+                throw AnalysisDocumentError.invalidDependency(modelBlockID)
+            }
+            return try AnalysisRun(
+                sourceFingerprint: document.source.fingerprint, modelBlockID: modelBlockID,
+                transformationBlockIDs: document.transformationAncestors(of: modelBlockID),
+                recipe: recipe, startedAt: startedAt, completedAt: completedAt,
+                status: status, retainedObservationCount: retainedObservationCount,
+                failureDescription: failureDescription
+            )
+        }
+    }
+
     /// A captioned statistical figure recorded by a host. The rendered pixels
     /// intentionally do not live in the document: a host can redraw the figure
     /// from its model recipe, while the annotation remains searchable and
@@ -385,6 +533,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         case transformation(Transformation)
         case model(ModelRecipe)
         case advancedModel(AdvancedModelRecipe)
+        case run(AnalysisRun)
         case evidence(EvidenceSnapshot)
         case advancedEvidence(AdvancedModelEvidence)
         case figure(FigureAnnotation)
@@ -443,6 +592,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             case .transformation(let transformation): return transformation.isValid
             case .model(let recipe): return recipe.isValid
             case .advancedModel(let recipe): return recipe.isValid
+            case .run(let run): return run.isValid
             case .evidence(let evidence): return evidence.isValid
             case .advancedEvidence(let evidence): return evidence.isValid
             case .figure(let figure): return figure.isValid
@@ -536,6 +686,32 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }?.id
     }
 
+    private func runRecipe(for modelBlockID: UUID) -> AnalysisRunRecipe? {
+        guard let block = blocks.first(where: { $0.id == modelBlockID }) else { return nil }
+        switch block.payload {
+        case .model(let recipe): return .model(recipe)
+        case .advancedModel(let recipe): return .advancedModel(recipe)
+        default: return nil
+        }
+    }
+
+    /// Transformations are retained in document order, which is the replay
+    /// order. Non-transformation ancestors (such as the chart model a unified
+    /// model descends from) deliberately do not enter the snapshot.
+    private func transformationAncestors(of blockID: UUID) -> [UUID] {
+        var pending = [blockID]
+        var visited = Set<UUID>()
+        while let current = pending.popLast(),
+              visited.insert(current).inserted,
+              let block = blocks.first(where: { $0.id == current }) {
+            pending.append(contentsOf: block.upstreamBlockIDs)
+        }
+        return blocks.compactMap { block in
+            guard visited.contains(block.id), case .transformation = block.payload else { return nil }
+            return block.id
+        }
+    }
+
     /// Stable JSON intended for project files or clipboard/export transfer.
     public func jsonData() throws -> Data {
         let encoder = JSONEncoder()
@@ -565,7 +741,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
         // Versions 1 and 2 predate advanced model/evidence blocks; version 3
-        // predates native sparse-execution evidence. Their
+        // predates native sparse-execution evidence; version 4 predates
+        // explicit immutable run records. Their
         // existing representation is unchanged, so normalize on open and
         // write the upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
@@ -603,18 +780,23 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 throw AnalysisDocumentError.invalidDependency(block.id)
             }
             if case .evidence(let evidence) = block.payload {
-                guard evidence.sourceFingerprint == source.fingerprint,
-                      hasDirectModelDependency(block) else {
+                guard (block.state == .stale || evidence.sourceFingerprint == source.fingerprint),
+                      (hasDirectModelDependency(block) || hasDirectCompletedRunDependency(block)) else {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
             }
             if case .advancedEvidence(let evidence) = block.payload {
-                guard evidence.sourceFingerprint == source.fingerprint,
-                      hasDirectAdvancedModelDependency(block) else {
+                guard (block.state == .stale || evidence.sourceFingerprint == source.fingerprint),
+                      (hasDirectAdvancedModelDependency(block) || hasDirectCompletedAdvancedRunDependency(block)) else {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
             }
-            if case .figure = block.payload, !hasDirectModelDependency(block) {
+            if case .run(let run) = block.payload,
+               !isValidRunDependency(block, run: run) {
+                throw AnalysisDocumentError.invalidDependency(block.id)
+            }
+            if case .figure = block.payload,
+               !(hasDirectModelDependency(block) || hasDirectCompletedRunDependency(block)) {
                 throw AnalysisDocumentError.invalidDependency(block.id)
             }
             preceding.insert(block.id)
@@ -637,6 +819,36 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             blocks.first(where: { $0.id == id }).map { candidate in
                 if case .advancedModel = candidate.payload { return true }
                 return false
+            } ?? false
+        }
+    }
+
+    private func isValidRunDependency(_ block: Block, run: AnalysisRun) -> Bool {
+        guard (block.state == .stale || run.sourceFingerprint == source.fingerprint),
+              block.upstreamBlockIDs == [run.modelBlockID],
+              runRecipe(for: run.modelBlockID) != nil,
+              transformationAncestors(of: run.modelBlockID) == run.transformationBlockIDs else {
+            return false
+        }
+        return true
+    }
+
+    private func hasDirectCompletedRunDependency(_ block: Block) -> Bool {
+        block.upstreamBlockIDs.contains { id in
+            blocks.first(where: { $0.id == id }).map { candidate in
+                guard case .run(let run) = candidate.payload else { return false }
+                return run.status == .completed
+            } ?? false
+        }
+    }
+
+    private func hasDirectCompletedAdvancedRunDependency(_ block: Block) -> Bool {
+        block.upstreamBlockIDs.contains { id in
+            blocks.first(where: { $0.id == id }).map { candidate in
+                guard case .run(let run) = candidate.payload,
+                      run.status == .completed,
+                      case .advancedModel = run.recipe else { return false }
+                return true
             } ?? false
         }
     }

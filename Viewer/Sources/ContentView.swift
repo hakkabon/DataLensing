@@ -888,6 +888,7 @@ struct ContentView: View {
         case .transformation: "line.3.horizontal.decrease.circle"
         case .model: "function"
         case .advancedModel: "function"
+        case .run: "play.circle"
         case .evidence: "checklist"
         case .advancedEvidence: "checklist"
         case .figure: "chart.xyaxis.line"
@@ -901,6 +902,16 @@ struct ContentView: View {
         case .model(let recipe): return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response)"
         case .advancedModel(let recipe):
             return "\(recipe.specification.strategy.rawValue) · \(recipe.predictorColumns.joined(separator: ", ")) → \(recipe.responseColumn)"
+        case .run(let run):
+            let retained = run.retainedObservationCount.map { "\($0) retained" }
+            let solver = run.requestedSolverPreference.map { "requested \($0.rawValue)" }
+            let lineage = run.transformationBlockIDs.isEmpty
+                ? "raw source" : "\(run.transformationBlockIDs.count) transforms"
+            let validationSeed = "validation seed \(run.validationSeed)"
+            let bootstrapSeed = run.bootstrapSeed.map { "bootstrap seed \($0)" }
+            let failure = run.failureDescription
+            return [run.status.rawValue, retained, lineage, validationSeed, bootstrapSeed, solver, failure]
+                .compactMap { $0 }.joined(separator: " · ")
         case .evidence(let evidence):
             return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"
         case .advancedEvidence(let evidence):
@@ -1064,6 +1075,7 @@ struct ContentView: View {
         documentError = nil
         documentRecomputing = true
         let figureKind = figureKindForCurrentPlanes()
+        let startedAt = Date()
         documentTask = Task {
             do {
                 let result = try await scopedDocumentRecompute(
@@ -1072,12 +1084,21 @@ struct ContentView: View {
                 guard !Task.isCancelled else { return }
                 var updated = document
                 _ = try updated.markCurrent(through: modelID)
+                let runRecord = try AnalysisDocument.AnalysisRun.completed(
+                    in: updated, modelBlockID: modelID,
+                    retainedObservationCount: result.fit.sourceRows.count,
+                    startedAt: startedAt
+                )
+                let runBlock = try AnalysisDocument.Block(
+                    title: "Recomputed analysis run", upstreamBlockIDs: [modelID], payload: .run(runRecord)
+                )
+                try updated.append(runBlock)
                 let figure = try AnalysisDocument.FigureAnnotation(
                     kind: figureKind,
                     caption: "Recomputed \(figureKind.rawValue): \(result.fit.loaded.yName) by \(result.fit.loaded.xName)."
                 )
                 let figureBlock = try AnalysisDocument.Block(
-                    title: "Recomputed figure", upstreamBlockIDs: [modelID], payload: .figure(figure)
+                    title: "Recomputed figure", upstreamBlockIDs: [runBlock.id], payload: .figure(figure)
                 )
                 try updated.append(figureBlock)
                 let evidence = try AnalysisDocumentExecutor.evidenceSnapshot(
@@ -1085,7 +1106,7 @@ struct ContentView: View {
                     workbenchOutputs: result.outputs
                 )
                 let evidenceBlock = try AnalysisDocument.Block(
-                    title: "Recomputed validation evidence", upstreamBlockIDs: [modelID],
+                    title: "Recomputed validation evidence", upstreamBlockIDs: [runBlock.id],
                     payload: .evidence(evidence)
                 )
                 try updated.append(evidenceBlock)
@@ -1112,6 +1133,16 @@ struct ContentView: View {
                 documentRecomputing = false
             } catch {
                 guard !Task.isCancelled else { return }
+                var failed = document
+                if let record = try? AnalysisDocument.AnalysisRun.failed(
+                    in: failed, modelBlockID: modelID, description: String(describing: error),
+                    startedAt: startedAt
+                ), let block = try? AnalysisDocument.Block(
+                    title: "Failed analysis run", upstreamBlockIDs: [modelID], payload: .run(record)
+                ) {
+                    try? failed.append(block)
+                    analysisDocument = failed
+                }
                 documentError = String(describing: error)
                 documentRecomputing = false
             }
@@ -1211,6 +1242,7 @@ struct ContentView: View {
             )
             var prepared = document
             try prepared.append(modelBlock)
+            let startedAt = Date()
             advancedTask = Task {
                 do {
                     let run = try await Task.detached(priority: .userInitiated) {
@@ -1220,6 +1252,15 @@ struct ContentView: View {
                     }.value
                     guard !Task.isCancelled else { return }
                     var updated = prepared
+                    let runRecord = try AnalysisDocument.AnalysisRun.completed(
+                        in: updated, modelBlockID: modelBlock.id,
+                        retainedObservationCount: run.fit.sourceRows.count,
+                        startedAt: startedAt
+                    )
+                    let runBlock = try AnalysisDocument.Block(
+                        title: "Advanced analysis run", upstreamBlockIDs: [modelBlock.id], payload: .run(runRecord)
+                    )
+                    try updated.append(runBlock)
                     let figureKind: AnalysisDocument.FigureAnnotation.Kind = advancedStrategy.requiresSecondPredictor
                         ? .surface : .fittedCurve
                     let figure = try AnalysisDocument.FigureAnnotation(
@@ -1227,10 +1268,10 @@ struct ContentView: View {
                         caption: "\(advancedStrategy.rawValue) fit: \(recipe.responseColumn) by \(recipe.predictorColumns.joined(separator: ", "))."
                     )
                     try updated.append(AnalysisDocument.Block(
-                        title: "Advanced model figure", upstreamBlockIDs: [modelBlock.id], payload: .figure(figure)
+                        title: "Advanced model figure", upstreamBlockIDs: [runBlock.id], payload: .figure(figure)
                     ))
                     try updated.append(AnalysisDocument.Block(
-                        title: "Advanced validation evidence", upstreamBlockIDs: [modelBlock.id],
+                        title: "Advanced validation evidence", upstreamBlockIDs: [runBlock.id],
                         payload: .advancedEvidence(run.evidence)
                     ))
                     analysisDocument = updated
@@ -1240,6 +1281,16 @@ struct ContentView: View {
                     advancedLoading = false
                 } catch {
                     guard !Task.isCancelled else { return }
+                    var failed = prepared
+                    if let record = try? AnalysisDocument.AnalysisRun.failed(
+                        in: failed, modelBlockID: modelBlock.id, description: String(describing: error),
+                        startedAt: startedAt
+                    ), let block = try? AnalysisDocument.Block(
+                        title: "Failed advanced run", upstreamBlockIDs: [modelBlock.id], payload: .run(record)
+                    ) {
+                        try? failed.append(block)
+                        analysisDocument = failed
+                    }
                     documentError = String(describing: error)
                     advancedLoading = false
                 }

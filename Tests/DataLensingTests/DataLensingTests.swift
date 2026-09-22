@@ -1037,6 +1037,57 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocumentExecutor.workbenchInput(document: document, fit: fit).sourceRows == [0, 2, 3])
 }
 
+@Test func analysisRunsSnapshotInputsAndRemainAsStaleHistoricalRecords() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,3\n2,5\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let transform = try AnalysisDocument.Block(
+        title: "Complete cases", payload: .transformation(.dropMissing(columns: ["x", "y"]))
+    )
+    let recipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess,
+        tuning: WorkbenchTuning(.interactive), validationConfiguration: ValidationConfiguration()
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Trend", upstreamBlockIDs: [transform.id], payload: .model(recipe)
+    )
+    var document = try AnalysisDocument(title: "Run lineage", source: source, blocks: [transform, model])
+    let startedAt = Date(timeIntervalSince1970: 1_700_001_000)
+    let completed = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: model.id, retainedObservationCount: 3,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(2)
+    )
+    #expect(completed.recipe == .model(recipe))
+    #expect(completed.transformationBlockIDs == [transform.id])
+    #expect(completed.validationSeed == recipe.validationConfiguration.seed)
+    let runBlock = try AnalysisDocument.Block(
+        title: "Completed run", upstreamBlockIDs: [model.id], payload: .run(completed)
+    )
+    try document.append(runBlock)
+
+    let stale = try document.update(
+        blockID: transform.id,
+        payload: .transformation(.filterNumeric(column: "x", comparison: .greaterThanOrEqual, value: 0))
+    )
+    #expect(stale == Set([model.id, runBlock.id]))
+    #expect(document.blocks.last?.state == .stale)
+
+    let replacementSource = try AnalysisDocument.Source(
+        displayName: source.displayName, inputObservationCount: source.inputObservationCount,
+        columns: source.columns, fingerprint: "changed-source-fingerprint", byteCount: source.byteCount
+    )
+    #expect(try document.updateSource(replacementSource).contains(runBlock.id))
+    #expect(document.blocks.last?.state == .stale)
+
+    let failed = try AnalysisDocument.AnalysisRun.failed(
+        in: document, modelBlockID: model.id, description: "Source could not be replayed.",
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1)
+    )
+    #expect(failed.status == .failed)
+    #expect(failed.retainedObservationCount == nil)
+    #expect(failed.failureDescription == "Source could not be replayed.")
+}
+
 @Test func advancedDocumentEvidenceRecordsGamValidationAndBootstrapStability() throws {
     let rows = (0..<36).map { index -> String in
         let x = Double(index) / 7
@@ -1163,11 +1214,25 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(sparse.nonZeroCount < sparse.designRows * sparse.designColumns / 4)
     #expect(sparse.iterations > 0 && sparse.normalResidualNorm.isFinite)
 
+    var savedDocument = document
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let run = try AnalysisDocument.AnalysisRun.completed(
+        in: savedDocument, modelBlockID: block.id,
+        retainedObservationCount: fit.sourceRows.count, startedAt: startedAt,
+        completedAt: startedAt.addingTimeInterval(1)
+    )
+    #expect(run.transformationBlockIDs.isEmpty)
+    #expect(run.validationSeed == recipe.validationConfiguration.seed)
+    #expect(run.requestedSolverPreference == .sparseCGLS)
+    let runBlock = try AnalysisDocument.Block(
+        title: "Sparse analysis run", upstreamBlockIDs: [block.id], payload: .run(run),
+        createdAt: startedAt, updatedAt: startedAt
+    )
+    try savedDocument.append(runBlock, at: startedAt)
     let evidenceBlock = try AnalysisDocument.Block(
-        title: "Sparse numerical evidence", upstreamBlockIDs: [block.id],
+        title: "Sparse numerical evidence", upstreamBlockIDs: [runBlock.id],
         payload: .advancedEvidence(evidence)
     )
-    var savedDocument = document
     try savedDocument.append(evidenceBlock)
     #expect(try AnalysisDocument(jsonData: savedDocument.jsonData()) == savedDocument)
 

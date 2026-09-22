@@ -211,9 +211,16 @@ normal residual, and working objective. A document therefore distinguishes an
 explicit sparse request, an automatic dense selection, and an automatic sparse
 fallback rather than treating a preference as proof of execution.
 
-The next notebook steps are reusable validation plans and explicit analysis-run
-records, followed by review-ready comparisons and annotations tied to frozen
-evidence blocks.
+Every explicit recomputation now appends an immutable `AnalysisRun` block. It
+snapshots the source fingerprint, ordered transformation ancestry, model recipe,
+validation/bootstrap seeds, requested numerical policy, start/completion times,
+retained-row count, and a completed or failed terminal verdict. New figures and
+evidence depend on that run block, so a later recomputation cannot overwrite or
+silently reassign prior evidence. Editing an upstream block marks historic runs
+stale while preserving their recorded inputs and outcome.
+
+The next notebook steps are reusable validation plans, followed by review-ready
+comparisons and annotations tied to frozen evidence blocks.
 
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
