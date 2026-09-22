@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public let id: UUID
     public let schemaVersion: Int
@@ -21,9 +21,13 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     public private(set) var updatedAt: Date
     /// Blocks appear in dependency order; an input can only name an earlier block.
     public private(set) var blocks: [Block]
+    /// A review-oriented ordering of existing blocks. Composition never
+    /// changes execution dependencies or freshness.
+    public private(set) var composition: NotebookComposition
 
     public init(
         id: UUID = UUID(), title: String, source: Source, blocks: [Block] = [],
+        composition: NotebookComposition = NotebookComposition(),
         createdAt: Date = Date(), updatedAt: Date = Date()
     ) throws {
         self.id = id
@@ -31,6 +35,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         self.title = title
         self.source = source
         self.blocks = blocks
+        self.composition = composition
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         try validate()
@@ -747,6 +752,146 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A portable, review-oriented arrangement of notebook blocks.
+    ///
+    /// Sections contain prose and references only. They intentionally cannot
+    /// introduce executable code, duplicate a block, or modify a block's
+    /// dependency graph. This keeps a polished narrative separate from the
+    /// analysis record that it explains.
+    public struct NotebookComposition: Codable, Sendable, Hashable {
+        public struct Section: Codable, Sendable, Hashable, Identifiable {
+            public let id: UUID
+            public let title: String
+            /// Short human interpretation or review context; empty is allowed
+            /// while a section is being assembled.
+            public let narrative: String
+            /// Existing notebook blocks, in the intended reader order.
+            public let blockIDs: [UUID]
+
+            public init(
+                id: UUID = UUID(), title: String, narrative: String = "",
+                blockIDs: [UUID] = []
+            ) throws {
+                let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedTitle.isEmpty,
+                      Set(blockIDs).count == blockIDs.count else {
+                    throw AnalysisDocumentError.invalidConfiguration
+                }
+                self.id = id
+                self.title = normalizedTitle
+                self.narrative = narrative.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.blockIDs = blockIDs
+            }
+
+            fileprivate var isValid: Bool {
+                !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && Set(blockIDs).count == blockIDs.count
+            }
+        }
+
+        public private(set) var sections: [Section]
+
+        public init() {
+            sections = []
+        }
+
+        public init(sections: [Section]) throws {
+            guard Self.isValid(sections) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.sections = sections
+        }
+
+        /// References in their presentation order.
+        public var blockIDs: [UUID] { sections.flatMap(\.blockIDs) }
+
+        public mutating func appendSection(
+            title: String, narrative: String = ""
+        ) throws -> UUID {
+            let section = try Section(title: title, narrative: narrative)
+            sections.append(section)
+            return section.id
+        }
+
+        public mutating func updateSection(
+            id: UUID, title: String, narrative: String
+        ) throws {
+            guard let index = sections.firstIndex(where: { $0.id == id }) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            sections[index] = try Section(
+                id: id, title: title, narrative: narrative,
+                blockIDs: sections[index].blockIDs
+            )
+        }
+
+        public mutating func moveSection(id: UUID, to destinationIndex: Int) throws {
+            guard let index = sections.firstIndex(where: { $0.id == id }),
+                  sections.indices.contains(destinationIndex) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            let section = sections.remove(at: index)
+            sections.insert(section, at: destinationIndex)
+        }
+
+        fileprivate mutating func assign(blockID: UUID, to sectionID: UUID) throws {
+            guard !blockIDs.contains(blockID),
+                  let index = sections.firstIndex(where: { $0.id == sectionID }) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            let section = sections[index]
+            sections[index] = try Section(
+                id: section.id, title: section.title, narrative: section.narrative,
+                blockIDs: section.blockIDs + [blockID]
+            )
+        }
+
+        fileprivate static func initialOutline(for blocks: [Block]) throws -> NotebookComposition {
+            var preparation: [UUID] = []
+            var methods: [UUID] = []
+            var evidence: [UUID] = []
+            for block in blocks {
+                switch block.payload {
+                case .transformation:
+                    preparation.append(block.id)
+                case .validationPlan, .model, .advancedModel:
+                    methods.append(block.id)
+                case .run, .evidence, .advancedEvidence, .figure, .note:
+                    evidence.append(block.id)
+                }
+            }
+            var sections: [Section] = []
+            if !preparation.isEmpty {
+                sections.append(try Section(
+                    title: "Data & preparation",
+                    narrative: "Source selection and replayable preparation.", blockIDs: preparation
+                ))
+            }
+            if !methods.isEmpty {
+                sections.append(try Section(
+                    title: "Models & validation",
+                    narrative: "Model specifications and the validation policies used to assess them.",
+                    blockIDs: methods
+                ))
+            }
+            if !evidence.isEmpty {
+                sections.append(try Section(
+                    title: "Results & interpretation",
+                    narrative: "Frozen runs, diagnostics, figures, and review notes.", blockIDs: evidence
+                ))
+            }
+            return try NotebookComposition(sections: sections)
+        }
+
+        fileprivate var isValid: Bool { Self.isValid(sections) }
+
+        private static func isValid(_ sections: [Section]) -> Bool {
+            Set(sections.map(\.id)).count == sections.count
+                && sections.allSatisfy(\.isValid)
+                && Set(sections.flatMap(\.blockIDs)).count == sections.flatMap(\.blockIDs).count
+        }
+    }
+
     /// Append a block after its dependencies. No result is recomputed implicitly.
     public mutating func append(_ block: Block, at date: Date = Date()) throws {
         blocks.append(block)
@@ -847,6 +992,59 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         return plan
     }
 
+    /// Blocks not yet placed in a reader-facing notebook section.
+    public var uncomposedBlocks: [Block] {
+        let assigned = Set(composition.blockIDs)
+        return blocks.filter { !assigned.contains($0.id) }
+    }
+
+    /// Generate a conservative, review-ready outline from current block kinds.
+    /// Existing custom composition is never overwritten implicitly.
+    public mutating func createInitialComposition(at date: Date = Date()) throws {
+        guard composition.sections.isEmpty else { throw AnalysisDocumentError.invalidConfiguration }
+        composition = try NotebookComposition.initialOutline(for: blocks)
+        updatedAt = date
+        try validate()
+    }
+
+    @discardableResult
+    public mutating func appendCompositionSection(
+        title: String, narrative: String = "", at date: Date = Date()
+    ) throws -> UUID {
+        let sectionID = try composition.appendSection(title: title, narrative: narrative)
+        updatedAt = date
+        try validate()
+        return sectionID
+    }
+
+    public mutating func updateCompositionSection(
+        id: UUID, title: String, narrative: String, at date: Date = Date()
+    ) throws {
+        try composition.updateSection(id: id, title: title, narrative: narrative)
+        updatedAt = date
+        try validate()
+    }
+
+    public mutating func moveCompositionSection(
+        id: UUID, to destinationIndex: Int, at date: Date = Date()
+    ) throws {
+        try composition.moveSection(id: id, to: destinationIndex)
+        updatedAt = date
+        try validate()
+    }
+
+    /// Place one currently uncomposed block at the end of a composition section.
+    public mutating func assignToComposition(
+        blockID: UUID, sectionID: UUID, at date: Date = Date()
+    ) throws {
+        guard blocks.contains(where: { $0.id == blockID }) else {
+            throw AnalysisDocumentError.invalidDependency(blockID)
+        }
+        try composition.assign(blockID: blockID, to: sectionID)
+        updatedAt = date
+        try validate()
+    }
+
     private func runRecipe(for modelBlockID: UUID) -> AnalysisRunRecipe? {
         guard let block = blocks.first(where: { $0.id == modelBlockID }) else { return nil }
         switch block.payload {
@@ -886,7 +1084,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, schemaVersion, title, source, createdAt, updatedAt, blocks
+        case id, schemaVersion, title, source, createdAt, updatedAt, blocks, composition
     }
 
     public init(from decoder: Decoder) throws {
@@ -898,15 +1096,18 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         blocks = try values.decode([Block].self, forKey: .blocks)
+        composition = try values.decodeIfPresent(NotebookComposition.self, forKey: .composition)
+            ?? NotebookComposition()
         guard (1...Self.currentSchemaVersion).contains(decodedSchemaVersion) else {
             throw AnalysisDocumentError.unsupportedSchema(decodedSchemaVersion)
         }
         // Versions 1 and 2 predate advanced model/evidence blocks; version 3
         // predates native sparse-execution evidence; version 4 predates
         // explicit immutable run records; version 5 predates reusable
-        // validation-plan blocks and optional model-plan links. Existing
-        // representation is unchanged, so normalize on open and write the
-        // upgraded schema only when the host later saves.
+        // validation-plan blocks and optional model-plan links; version 6
+        // predates composition sections. Existing representation is unchanged,
+        // so normalize on open and write the upgraded schema only when the
+        // host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }
@@ -931,7 +1132,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         guard schemaVersion == Self.currentSchemaVersion,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               source.isValid,
-              Set(blocks.map(\.id)).count == blocks.count else {
+              Set(blocks.map(\.id)).count == blocks.count,
+              composition.isValid,
+              Set(composition.blockIDs).isSubset(of: Set(blocks.map(\.id))) else {
             throw AnalysisDocumentError.invalidConfiguration
         }
         var preceding = Set<UUID>()

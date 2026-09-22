@@ -829,6 +829,7 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 
     var legacyObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
+    legacyObject.removeValue(forKey: "composition")
     legacyObject["schemaVersion"] = 1
     let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
     #expect(try AnalysisDocument(jsonData: legacyData).schemaVersion == AnalysisDocument.currentSchemaVersion)
@@ -836,6 +837,12 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     legacyObject["schemaVersion"] = 3
     let versionThreeData = try JSONSerialization.data(withJSONObject: legacyObject)
     #expect(try AnalysisDocument(jsonData: versionThreeData).schemaVersion == AnalysisDocument.currentSchemaVersion)
+
+    legacyObject["schemaVersion"] = 6
+    let versionSixData = try JSONSerialization.data(withJSONObject: legacyObject)
+    let upgradedVersionSix = try AnalysisDocument(jsonData: versionSixData)
+    #expect(upgradedVersionSix.schemaVersion == AnalysisDocument.currentSchemaVersion)
+    #expect(upgradedVersionSix.composition.sections.isEmpty)
 
     var futureObject = try #require(JSONSerialization.jsonObject(with: document.jsonData()) as? [String: Any])
     futureObject["schemaVersion"] = 99
@@ -884,6 +891,80 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     )
     #expect(throws: AnalysisDocumentError.invalidEvidence(mismatchedEvidence.id)) {
         _ = try AnalysisDocument(title: "Invalid evidence", source: first, blocks: [model, mismatchedEvidence])
+    }
+}
+
+@Test func notebookCompositionOrganizesExistingBlocksWithoutChangingExecutionGraph() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,2\n2,4\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let transform = try AnalysisDocument.Block(
+        title: "Complete cases", payload: .transformation(.dropMissing(columns: ["x", "y"]))
+    )
+    let defaultValidation = ValidationConfiguration()
+    let plan = try AnalysisDocument.ValidationPlan(
+        intendedUse: .orderedOrSpatial, foldCount: 3, partitioning: .blocked, seed: 13
+    )
+    let planBlock = try AnalysisDocument.Block(title: "Blocked validation", payload: .validationPlan(plan))
+    let recipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: plan.validationConfiguration(for: defaultValidation.specification),
+        validationPlanBlockID: planBlock.id
+    )
+    let model = try AnalysisDocument.Block(
+        title: "Loess trend", upstreamBlockIDs: [transform.id, planBlock.id], payload: .model(recipe)
+    )
+    var document = try AnalysisDocument(
+        title: "Composed trend", source: source, blocks: [transform, planBlock, model]
+    )
+    let run = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: model.id, retainedObservationCount: 3,
+        startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        completedAt: Date(timeIntervalSince1970: 1_700_000_001)
+    )
+    let runBlock = try AnalysisDocument.Block(
+        title: "Recorded run", upstreamBlockIDs: [model.id], payload: .run(run)
+    )
+    let figureBlock = try AnalysisDocument.Block(
+        title: "Trend figure", upstreamBlockIDs: [runBlock.id],
+        payload: .figure(try AnalysisDocument.FigureAnnotation(kind: .fittedCurve, caption: "Trend."))
+    )
+    let noteBlock = try AnalysisDocument.Block(title: "Interpretation", payload: .note("Residual pattern is acceptable."))
+    try document.append(runBlock)
+    try document.append(figureBlock)
+    try document.append(noteBlock)
+
+    try document.createInitialComposition()
+    #expect(document.composition.sections.map(\.title) == [
+        "Data & preparation", "Models & validation", "Results & interpretation"
+    ])
+    #expect(document.composition.blockIDs == document.blocks.map(\.id))
+    #expect(document.uncomposedBlocks.isEmpty)
+    #expect(document.blocks.map(\.upstreamBlockIDs) == [
+        [], [], [transform.id, planBlock.id], [model.id], [runBlock.id], []
+    ])
+
+    let conclusionID = try document.appendCompositionSection(
+        title: "Conclusion", narrative: "The trend is stable over the observed range."
+    )
+    let laterNote = try AnalysisDocument.Block(title: "Follow-up", payload: .note("Compare alternative spans next."))
+    try document.append(laterNote)
+    #expect(document.uncomposedBlocks == [laterNote])
+    try document.assignToComposition(blockID: laterNote.id, sectionID: conclusionID)
+    try document.updateCompositionSection(
+        id: conclusionID, title: "Conclusion", narrative: "Compare alternative spans in the next run."
+    )
+    try document.moveCompositionSection(id: conclusionID, to: 0)
+    #expect(document.composition.sections.first?.id == conclusionID)
+    #expect(document.uncomposedBlocks.isEmpty)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+
+    let danglingSection = try AnalysisDocument.NotebookComposition.Section(
+        title: "Invalid", blockIDs: [UUID()]
+    )
+    let danglingComposition = try AnalysisDocument.NotebookComposition(sections: [danglingSection])
+    #expect(throws: AnalysisDocumentError.invalidConfiguration) {
+        _ = try AnalysisDocument(title: "Invalid composition", source: source, composition: danglingComposition)
     }
 }
 

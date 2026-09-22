@@ -224,8 +224,17 @@ construction (shuffled, blocked ordered/spatial, or binary-stratified), its
 deterministic seed, optional bootstrap policy, and an optional comparison cohort.
 Models retain the plan's resolved configuration alongside their exact statistical
 specification; changing a plan makes dependent models and runs visibly stale
-while preserving their immutable historical snapshots. The next notebook step is
-review-ready, paired model-comparison evidence tied to those frozen runs.
+while preserving their immutable historical snapshots.
+
+Notebook composition provides the presentation layer for that record. Its saved
+sections contain prose and an ordered, non-duplicated set of references to
+existing blocks; they cannot execute code or alter model dependencies. The
+viewer can generate a conservative Data & preparation / Models & validation /
+Results & interpretation outline, then lets reviewers add narrative, move
+sections, and place later uncomposed blocks explicitly. This makes a document
+readable as a statistical report while retaining the underlying replay graph.
+The next statistical layer is review-ready, paired model-comparison evidence
+tied to those frozen runs.
 
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in

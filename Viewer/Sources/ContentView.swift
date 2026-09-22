@@ -177,6 +177,10 @@ struct ContentView: View {
     @State private var validationPlanBootstrap = false
     @State private var validationPlanCohort = ""
     @State private var selectedValidationPlanBlockID: UUID?
+    @State private var compositionSectionTitle = "Conclusion"
+    @State private var compositionSectionNarrative = ""
+    @State private var selectedCompositionSectionID: UUID?
+    @State private var selectedUncomposedBlockID: UUID?
     @State private var advancedTask: Task<Void, Never>?
     @State private var advancedLoading = false
 
@@ -365,6 +369,60 @@ struct ContentView: View {
                             }
                         }
                         .font(.caption)
+                    }
+
+                    Divider()
+                    Label("Notebook composition", systemImage: "rectangle.3.group")
+                        .font(.caption.weight(.semibold))
+                    Text("Arrange existing analysis blocks into a reader-facing narrative; composition never recomputes a model.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if document.composition.sections.isEmpty {
+                        Button {
+                            createInitialComposition()
+                        } label: {
+                            Label("Create Review Outline", systemImage: "text.badge.checkmark")
+                        }
+                        .disabled(documentRecomputing || document.blocks.isEmpty)
+                    } else {
+                        Text("\(document.composition.sections.count) sections · \(document.uncomposedBlocks.count) uncomposed blocks")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Picker("Edit section", selection: $selectedCompositionSectionID) {
+                            ForEach(document.composition.sections) { section in
+                                Text(section.title).tag(Optional(section.id))
+                            }
+                        }
+                        .onChange(of: selectedCompositionSectionID) { _, sectionID in
+                            loadCompositionSection(sectionID, from: document)
+                        }
+                        TextField("Section title", text: $compositionSectionTitle)
+                            .font(.caption)
+                        TextField("Section narrative", text: $compositionSectionNarrative)
+                            .font(.caption)
+                        HStack {
+                            Button("Add Section") { appendCompositionSection() }
+                            Button("Update Section") { updateCompositionSection() }
+                                .disabled(selectedCompositionSectionID == nil)
+                        }
+                        .font(.caption)
+                        if let sectionID = selectedCompositionSectionID,
+                           !document.uncomposedBlocks.isEmpty {
+                            Picker("Place block", selection: $selectedUncomposedBlockID) {
+                                Text("Choose block").tag(UUID?.none)
+                                ForEach(document.uncomposedBlocks) { block in
+                                    Text(block.title).tag(Optional(block.id))
+                                }
+                            }
+                            Button("Add Block to Section") {
+                                assignUncomposedBlock(to: sectionID)
+                            }
+                            .font(.caption)
+                            .disabled(selectedUncomposedBlockID == nil)
+                        }
+                        ForEach(document.composition.sections) { section in
+                            compositionSectionRow(section, in: document)
+                        }
                     }
 
                     if case .ready(let built) = phase {
@@ -946,6 +1004,120 @@ struct ContentView: View {
             selectedValidationPlanBlockID = block.id
         } catch {
             documentError = String(describing: error)
+        }
+    }
+
+    private func loadCompositionSection(_ sectionID: UUID?, from document: AnalysisDocument) {
+        guard let sectionID,
+              let section = document.composition.sections.first(where: { $0.id == sectionID }) else {
+            return
+        }
+        compositionSectionTitle = section.title
+        compositionSectionNarrative = section.narrative
+    }
+
+    private func createInitialComposition() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            try document.createInitialComposition()
+            analysisDocument = document
+            if let section = document.composition.sections.first {
+                selectedCompositionSectionID = section.id
+                loadCompositionSection(section.id, from: document)
+            }
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func appendCompositionSection() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            let sectionID = try document.appendCompositionSection(
+                title: compositionSectionTitle, narrative: compositionSectionNarrative
+            )
+            analysisDocument = document
+            selectedCompositionSectionID = sectionID
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func updateCompositionSection() {
+        guard var document = analysisDocument,
+              let sectionID = selectedCompositionSectionID else { return }
+        documentError = nil
+        do {
+            try document.updateCompositionSection(
+                id: sectionID, title: compositionSectionTitle,
+                narrative: compositionSectionNarrative
+            )
+            analysisDocument = document
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func moveCompositionSection(_ section: AnalysisDocument.NotebookComposition.Section, by offset: Int) {
+        guard var document = analysisDocument,
+              let index = document.composition.sections.firstIndex(where: { $0.id == section.id }) else { return }
+        let destination = index + offset
+        guard document.composition.sections.indices.contains(destination) else { return }
+        documentError = nil
+        do {
+            try document.moveCompositionSection(id: section.id, to: destination)
+            analysisDocument = document
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func assignUncomposedBlock(to sectionID: UUID) {
+        guard var document = analysisDocument,
+              let blockID = selectedUncomposedBlockID else { return }
+        documentError = nil
+        do {
+            try document.assignToComposition(blockID: blockID, sectionID: sectionID)
+            analysisDocument = document
+            selectedUncomposedBlockID = nil
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    @ViewBuilder
+    private func compositionSectionRow(
+        _ section: AnalysisDocument.NotebookComposition.Section, in document: AnalysisDocument
+    ) -> some View {
+        let index = document.composition.sections.firstIndex(where: { $0.id == section.id }) ?? 0
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Image(systemName: "text.alignleft")
+                    .foregroundStyle(Color.accentColor)
+                Text(section.title).font(.caption.weight(.medium)).lineLimit(1)
+                Spacer()
+                Button { moveCompositionSection(section, by: -1) } label: {
+                    Image(systemName: "arrow.up")
+                }
+                .buttonStyle(.borderless)
+                .disabled(index == 0)
+                Button { moveCompositionSection(section, by: 1) } label: {
+                    Image(systemName: "arrow.down")
+                }
+                .buttonStyle(.borderless)
+                .disabled(index == document.composition.sections.count - 1)
+            }
+            if !section.narrative.isEmpty {
+                Text(section.narrative)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Text("\(section.blockIDs.count) blocks")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
