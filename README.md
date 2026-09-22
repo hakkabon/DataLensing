@@ -242,7 +242,16 @@ ready only when it has analysis blocks, no stale blocks, and no open blockers;
 acceptance additionally requires every finding to be closed with a recorded
 outcome. Any execution or narrative edit returns the review state to draft, so
 a readiness badge cannot conceal changed inputs or unresolved feedback. The
-next statistical layer is paired model-comparison evidence tied to frozen runs.
+document can also record paired comparative evidence between two completed
+advanced-model runs. A comparison retains direct references to both immutable
+runs and their held-out validation snapshots, then stores a compact paired-loss
+summary rather than duplicating every out-of-fold prediction. It is marked
+comparable only when source fingerprint, transformation lineage, realized
+statistical scale selection, fold construction, held-out observations, and
+response family agree. Otherwise it persists the exact non-comparability
+verdict—for example different transformations, scale selection, validation
+configuration, response family, or fold assignment—rather than presenting a
+misleading winner.
 
 ## Scaled statistical workflows
 

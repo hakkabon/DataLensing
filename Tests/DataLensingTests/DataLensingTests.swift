@@ -1316,6 +1316,123 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 
+@Test func comparativeEvidencePairsFrozenRunsAndPreservesNonComparableVerdicts() throws {
+    let url = try scratchCSV("x,y\n0,0\n1,1\n2,2\n3,3\n4,4\n5,5\n6,6\n7,7\n8,8\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let rows = (0..<9).map { [Double($0)] }
+    let response = (0..<9).map(Double.init)
+    let baselineSpecification = StatisticalModelSpecification(
+        strategy: .additiveGaussian,
+        additive: AdditiveModelSpecification(terms: [.init(predictorIndex: 0, span: 0.9)])
+    )
+    let candidateSpecification = StatisticalModelSpecification(
+        strategy: .additiveGaussian,
+        additive: AdditiveModelSpecification(terms: [.init(predictorIndex: 0, span: 0.65)])
+    )
+    let baselineValidationConfiguration = ValidationConfiguration(
+        foldCount: 3, partitioning: .blocked, seed: 11, specification: baselineSpecification
+    )
+    let candidateValidationConfiguration = ValidationConfiguration(
+        foldCount: 3, partitioning: .blocked, seed: 11, specification: candidateSpecification
+    )
+    let mismatchedValidationConfiguration = ValidationConfiguration(
+        foldCount: 3, partitioning: .blocked, seed: 12, specification: candidateSpecification
+    )
+    let baselineValidation = try #require(CrossValidation.evaluate(
+        trainX: rows, trainY: response, configuration: baselineValidationConfiguration
+    ))
+    let candidateValidation = try #require(CrossValidation.evaluate(
+        trainX: rows, trainY: response, configuration: candidateValidationConfiguration
+    ))
+    let mismatchedValidation = try #require(CrossValidation.evaluate(
+        trainX: rows, trainY: response, configuration: mismatchedValidationConfiguration
+    ))
+    let baselineRecipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: baselineSpecification,
+        validationConfiguration: baselineValidationConfiguration
+    )
+    let candidateRecipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: candidateSpecification,
+        validationConfiguration: candidateValidationConfiguration
+    )
+    let mismatchedRecipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: candidateSpecification,
+        validationConfiguration: mismatchedValidationConfiguration
+    )
+    let baselineModel = try AnalysisDocument.Block(title: "Broad GAM", payload: .advancedModel(baselineRecipe))
+    let candidateModel = try AnalysisDocument.Block(title: "Narrow GAM", payload: .advancedModel(candidateRecipe))
+    let mismatchedModel = try AnalysisDocument.Block(title: "Different folds GAM", payload: .advancedModel(mismatchedRecipe))
+    var document = try AnalysisDocument(
+        title: "Compared GAMs", source: source, blocks: [baselineModel, candidateModel, mismatchedModel]
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let baselineRun = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: baselineModel.id, retainedObservationCount: 9,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1)
+    )
+    let candidateRun = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: candidateModel.id, retainedObservationCount: 9,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1)
+    )
+    let mismatchedRun = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: mismatchedModel.id, retainedObservationCount: 9,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1)
+    )
+    let baselineRunBlock = try AnalysisDocument.Block(
+        title: "Broad run", upstreamBlockIDs: [baselineModel.id], payload: .run(baselineRun)
+    )
+    let candidateRunBlock = try AnalysisDocument.Block(
+        title: "Narrow run", upstreamBlockIDs: [candidateModel.id], payload: .run(candidateRun)
+    )
+    let mismatchedRunBlock = try AnalysisDocument.Block(
+        title: "Different folds run", upstreamBlockIDs: [mismatchedModel.id], payload: .run(mismatchedRun)
+    )
+    try document.append(baselineRunBlock)
+    try document.append(candidateRunBlock)
+    try document.append(mismatchedRunBlock)
+    let diagnostics = FitDiagnostics(
+        responseFamily: .gaussian, linkFunction: .identity, observationCount: 9,
+        effectiveDegreesOfFreedom: 2, residualScale: 1
+    )
+    for (title, runBlock, validation) in [
+        ("Broad evidence", baselineRunBlock, baselineValidation),
+        ("Narrow evidence", candidateRunBlock, candidateValidation),
+        ("Different folds evidence", mismatchedRunBlock, mismatchedValidation),
+    ] {
+        let evidence = try AnalysisDocument.AdvancedModelEvidence(
+            sourceFingerprint: source.fingerprint, modelKind: .additiveGaussian,
+            diagnostics: diagnostics, validation: validation
+        )
+        try document.append(try AnalysisDocument.Block(
+            title: title, upstreamBlockIDs: [runBlock.id], payload: .advancedEvidence(evidence)
+        ))
+    }
+
+    #expect(document.comparisonCandidateRunBlocks.map(\.id) == [baselineRunBlock.id, candidateRunBlock.id, mismatchedRunBlock.id])
+    let comparisonID = try document.recordComparativeEvidence(
+        baselineRunBlockID: baselineRunBlock.id, candidateRunBlockID: candidateRunBlock.id,
+        at: startedAt.addingTimeInterval(2)
+    )
+    let comparisonBlock = try #require(document.blocks.first(where: { $0.id == comparisonID }))
+    let comparison = try #require({ if case .comparison(let value) = comparisonBlock.payload { return value }; return nil }())
+    #expect(comparison.verdict == .comparable)
+    #expect(comparison.pairedObservationCount == 9)
+    #expect(comparisonBlock.upstreamBlockIDs.count == 4)
+
+    let nonComparableID = try document.recordComparativeEvidence(
+        baselineRunBlockID: baselineRunBlock.id, candidateRunBlockID: mismatchedRunBlock.id,
+        at: startedAt.addingTimeInterval(3)
+    )
+    let nonComparableBlock = try #require(document.blocks.first(where: { $0.id == nonComparableID }))
+    let nonComparable = try #require({ if case .comparison(let value) = nonComparableBlock.payload { return value }; return nil }())
+    #expect(nonComparable.verdict == .validationConfigurationMismatch)
+
+    _ = try document.update(blockID: baselineModel.id, payload: .advancedModel(baselineRecipe))
+    #expect(document.blocks.first(where: { $0.id == comparisonID })?.state == .stale)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+}
+
 @Test func validationPlansAreReusableNotebookInputsWithHistoricalRunSnapshots() throws {
     let url = try scratchCSV("x,y\n0,1\n1,2\n2,3\n3,5\n4,6\n5,8\n")
     defer { try? FileManager.default.removeItem(at: url) }

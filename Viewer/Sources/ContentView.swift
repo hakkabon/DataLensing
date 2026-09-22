@@ -207,6 +207,8 @@ struct ContentView: View {
     @State private var selectedReviewTargetBlockID: UUID?
     @State private var selectedReviewFindingID: UUID?
     @State private var reviewResolution = ""
+    @State private var selectedComparisonBaselineRunID: UUID?
+    @State private var selectedComparisonCandidateRunID: UUID?
     @State private var advancedTask: Task<Void, Never>?
     @State private var advancedLoading = false
 
@@ -512,6 +514,8 @@ struct ContentView: View {
                     }
 
                     numericalExecutionPanel(for: document)
+
+                    comparativeEvidencePanel(for: document)
 
                     Button("Save Document…") { saveDocument() }
                         .disabled(documentRecomputing)
@@ -1168,6 +1172,21 @@ struct ContentView: View {
         }
     }
 
+    private func recordComparativeEvidence() {
+        guard var document = analysisDocument,
+              let baseline = selectedComparisonBaselineRunID,
+              let candidate = selectedComparisonCandidateRunID else { return }
+        documentError = nil
+        do {
+            _ = try document.recordComparativeEvidence(
+                baselineRunBlockID: baseline, candidateRunBlockID: candidate
+            )
+            analysisDocument = document
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
     @ViewBuilder
     private func reviewPanel(for document: AnalysisDocument) -> some View {
         let summary = document.reviewSummary
@@ -1179,10 +1198,10 @@ struct ContentView: View {
                 reviewReadinessBadge(summary)
             }
             Text(
-                "(summary.openFindingCount) open findings · (summary.openBlockerCount) blockers · (summary.staleBlockCount) stale blocks"
+                "\(summary.openFindingCount) open findings · \(summary.openBlockerCount) blockers · \(summary.staleBlockCount) stale blocks"
             )
             .font(.caption2)
-            .foregroundStyle(summary.canMarkReady ? .secondary : .orange)
+            .foregroundStyle(summary.canMarkReady ? Color.secondary : Color.orange)
             Text("Saved findings travel with this document; author labels are not authenticated identities or live collaboration.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -1262,7 +1281,7 @@ struct ContentView: View {
         let target = finding.targetBlockID.flatMap { id in
             document.blocks.first(where: { $0.id == id })?.title
         } ?? "Document"
-        return "[(finding.severity.rawValue)] (target)"
+        return "[\(finding.severity.rawValue)] \(target)"
     }
 
     @ViewBuilder
@@ -1275,7 +1294,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 Text(finding.severity.rawValue.capitalized).font(.caption2.weight(.semibold))
-                    .foregroundStyle(finding.severity == .blocker ? .red : .secondary)
+                    .foregroundStyle(finding.severity == .blocker ? Color.red : Color.secondary)
                 Text("· \(finding.status.rawValue) · \(target)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1319,6 +1338,106 @@ struct ContentView: View {
             Text("\(section.blockIDs.count) blocks")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func comparativeEvidencePanel(for document: AnalysisDocument) -> some View {
+        let candidates = document.comparisonCandidateRunBlocks
+        let comparisons = document.blocks.compactMap { block -> AnalysisDocument.ComparativeEvidence? in
+            guard case .comparison(let comparison) = block.payload else { return nil }
+            return comparison
+        }
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Comparative evidence", systemImage: "arrow.left.arrow.right.circle")
+                .font(.caption.weight(.semibold))
+            Text("Pairs immutable advanced runs and records either held-out loss evidence or the exact reason a comparison is unavailable.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if candidates.count < 2 {
+                Text("Record two completed advanced runs with validation evidence to compare them.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Baseline run", selection: $selectedComparisonBaselineRunID) {
+                    Text("Choose baseline").tag(UUID?.none)
+                    ForEach(candidates) { runBlock in
+                        Text(comparisonRunTitle(runBlock, in: document)).tag(Optional(runBlock.id))
+                    }
+                }
+                .font(.caption)
+                Picker("Candidate run", selection: $selectedComparisonCandidateRunID) {
+                    Text("Choose candidate").tag(UUID?.none)
+                    ForEach(candidates) { runBlock in
+                        Text(comparisonRunTitle(runBlock, in: document)).tag(Optional(runBlock.id))
+                    }
+                }
+                .font(.caption)
+                Button("Record Comparison") { recordComparativeEvidence() }
+                    .font(.caption)
+                    .disabled(
+                        documentRecomputing || selectedComparisonBaselineRunID == nil
+                            || selectedComparisonCandidateRunID == nil
+                            || selectedComparisonBaselineRunID == selectedComparisonCandidateRunID
+                    )
+            }
+            ForEach(Array(comparisons.enumerated()), id: \.offset) { _, comparison in
+                comparativeEvidenceRow(comparison, in: document)
+            }
+        }
+    }
+
+    private func comparisonRunTitle(_ runBlock: AnalysisDocument.Block, in document: AnalysisDocument) -> String {
+        guard case .run(let run) = runBlock.payload else { return runBlock.title }
+        let modelTitle = document.blocks.first(where: { $0.id == run.modelBlockID })?.title ?? "model"
+        return "\(modelTitle) · seed \(run.validationSeed)"
+    }
+
+    @ViewBuilder
+    private func comparativeEvidenceRow(
+        _ comparison: AnalysisDocument.ComparativeEvidence, in document: AnalysisDocument
+    ) -> some View {
+        let baseline = document.blocks.first(where: { $0.id == comparison.baselineRunBlockID })
+        let candidate = document.blocks.first(where: { $0.id == comparison.candidateRunBlockID })
+        let baselineTitle = baseline.map { comparisonRunTitle($0, in: document) } ?? "missing baseline"
+        let candidateTitle = candidate.map { comparisonRunTitle($0, in: document) } ?? "missing candidate"
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(baselineTitle) → \(candidateTitle)")
+                .font(.caption.weight(.medium)).lineLimit(1)
+            if comparison.verdict == .comparable,
+               let difference = comparison.meanLossDifference,
+               let baselineScore = comparison.baselinePrimaryScore,
+               let candidateScore = comparison.candidatePrimaryScore {
+                Text(String(
+                    format: "Paired %@ loss Δ %.4g · scores %.4g → %.4g · %@/%d candidate wins",
+                    comparison.responseFamily?.rawValue ?? "held-out", difference,
+                    baselineScore, candidateScore, comparison.candidateWinCount,
+                    comparison.pairedObservationCount
+                ))
+                .font(.caption2)
+                .foregroundStyle(
+                    difference < 0 ? Color.green : (difference > 0 ? Color.orange : Color.secondary)
+                )
+            } else {
+                Text("Not comparable: \(comparisonVerdictDescription(comparison.verdict))")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func comparisonVerdictDescription(_ verdict: AnalysisDocument.ComparativeEvidence.Verdict) -> String {
+        switch verdict {
+        case .comparable: return "paired held-out evidence"
+        case .sourceFingerprintMismatch: return "source fingerprints differ"
+        case .transformationLineageMismatch: return "transformation lineage differs"
+        case .scaleSelectionMismatch: return "statistical scale selection differs"
+        case .validationConfigurationMismatch: return "validation configuration differs"
+        case .validationUnavailable: return "held-out validation was not recorded"
+        case .responseFamilyMismatch: return "response families differ"
+        case .heldOutObservationsMismatch: return "held-out observations differ"
+        case .foldAssignmentMismatch: return "fold assignment differs"
         }
     }
 
@@ -1386,6 +1505,7 @@ struct ContentView: View {
         case .run: "play.circle"
         case .evidence: "checklist"
         case .advancedEvidence: "checklist"
+        case .comparison: "arrow.left.arrow.right.circle"
         case .figure: "chart.xyaxis.line"
         case .note: "note.text"
         }
@@ -1432,6 +1552,14 @@ struct ContentView: View {
             let bootstrap = evidence.bootstrap.map { "bootstrap \($0.successfulReplicates)/\($0.attemptedReplicates)" }
             let edf = String(format: "EDF %.3g", evidence.diagnostics.effectiveDegreesOfFreedom)
             return [evidence.modelKind.rawValue, edf, requested, solver, sparse, validation, calibration, bootstrap]
+                .compactMap { $0 }.joined(separator: " · ")
+        case .comparison(let comparison):
+            guard comparison.verdict == .comparable else {
+                return "Not comparable · \(comparisonVerdictDescription(comparison.verdict))"
+            }
+            let difference = comparison.meanLossDifference.map { String(format: "Δ loss %.4g", $0) }
+            return [comparison.responseFamily?.rawValue, difference,
+                    "\(comparison.candidateWinCount)/\(comparison.pairedObservationCount) candidate wins"]
                 .compactMap { $0 }.joined(separator: " · ")
         case .figure(let figure): return figure.caption
         case .note(let text): return text

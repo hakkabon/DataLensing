@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     public let id: UUID
     public let schemaVersion: Int
@@ -522,6 +522,93 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A compact, frozen summary of a paired held-out comparison. Individual
+    /// predictions remain in the two referenced validation snapshots, avoiding
+    /// a second full copy for large analyses.
+    public struct ComparativeEvidence: Codable, Sendable, Hashable {
+        public enum Verdict: String, Codable, Sendable, Hashable {
+            case comparable
+            case sourceFingerprintMismatch
+            case transformationLineageMismatch
+            case scaleSelectionMismatch
+            case validationConfigurationMismatch
+            case validationUnavailable
+            case responseFamilyMismatch
+            case heldOutObservationsMismatch
+            case foldAssignmentMismatch
+        }
+
+        public let capturedAt: Date
+        public let baselineRunBlockID: UUID
+        public let candidateRunBlockID: UUID
+        public let baselineEvidenceBlockID: UUID
+        public let candidateEvidenceBlockID: UUID
+        public let sourceFingerprint: String
+        public let verdict: Verdict
+        public let responseFamily: ResponseFamily?
+        public let baselinePrimaryScore: Double?
+        public let candidatePrimaryScore: Double?
+        /// Candidate-minus-baseline held-out loss. Negative favors the candidate.
+        public let meanLossDifference: Double?
+        public let candidateWinCount: Int
+        public let baselineWinCount: Int
+        public let tieCount: Int
+        public let pairedObservationCount: Int
+
+        fileprivate init(
+            capturedAt: Date, baselineRunBlockID: UUID, candidateRunBlockID: UUID,
+            baselineEvidenceBlockID: UUID, candidateEvidenceBlockID: UUID,
+            sourceFingerprint: String, verdict: Verdict,
+            responseFamily: ResponseFamily? = nil, baselinePrimaryScore: Double? = nil,
+            candidatePrimaryScore: Double? = nil, meanLossDifference: Double? = nil,
+            candidateWinCount: Int = 0, baselineWinCount: Int = 0, tieCount: Int = 0,
+            pairedObservationCount: Int = 0
+        ) throws {
+            let ids = [baselineRunBlockID, candidateRunBlockID, baselineEvidenceBlockID, candidateEvidenceBlockID]
+            let comparableValues = responseFamily != nil && baselinePrimaryScore?.isFinite == true
+                && candidatePrimaryScore?.isFinite == true && meanLossDifference?.isFinite == true
+                && pairedObservationCount > 0
+                && candidateWinCount + baselineWinCount + tieCount == pairedObservationCount
+            let unavailableValues = responseFamily == nil && baselinePrimaryScore == nil
+                && candidatePrimaryScore == nil && meanLossDifference == nil
+                && candidateWinCount == 0 && baselineWinCount == 0 && tieCount == 0
+                && pairedObservationCount == 0
+            guard !sourceFingerprint.isEmpty, Set(ids).count == ids.count,
+                  (verdict == .comparable ? comparableValues : unavailableValues) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.capturedAt = capturedAt
+            self.baselineRunBlockID = baselineRunBlockID
+            self.candidateRunBlockID = candidateRunBlockID
+            self.baselineEvidenceBlockID = baselineEvidenceBlockID
+            self.candidateEvidenceBlockID = candidateEvidenceBlockID
+            self.sourceFingerprint = sourceFingerprint
+            self.verdict = verdict
+            self.responseFamily = responseFamily
+            self.baselinePrimaryScore = baselinePrimaryScore
+            self.candidatePrimaryScore = candidatePrimaryScore
+            self.meanLossDifference = meanLossDifference
+            self.candidateWinCount = candidateWinCount
+            self.baselineWinCount = baselineWinCount
+            self.tieCount = tieCount
+            self.pairedObservationCount = pairedObservationCount
+        }
+
+        fileprivate var isValid: Bool {
+            (try? Self(
+                capturedAt: capturedAt, baselineRunBlockID: baselineRunBlockID,
+                candidateRunBlockID: candidateRunBlockID,
+                baselineEvidenceBlockID: baselineEvidenceBlockID,
+                candidateEvidenceBlockID: candidateEvidenceBlockID,
+                sourceFingerprint: sourceFingerprint, verdict: verdict,
+                responseFamily: responseFamily, baselinePrimaryScore: baselinePrimaryScore,
+                candidatePrimaryScore: candidatePrimaryScore, meanLossDifference: meanLossDifference,
+                candidateWinCount: candidateWinCount, baselineWinCount: baselineWinCount,
+                tieCount: tieCount, pairedObservationCount: pairedObservationCount
+            )) != nil
+        }
+    }
+
     /// The immutable outcome of one explicit analysis execution.
     public enum AnalysisRunStatus: String, Codable, Sendable, Hashable {
         case completed
@@ -539,6 +626,13 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             switch self {
             case .model(let recipe): recipe.validationConfiguration.seed
             case .advancedModel(let recipe): recipe.validationConfiguration.seed
+            }
+        }
+
+        fileprivate var validationConfiguration: ValidationConfiguration {
+            switch self {
+            case .model(let recipe): return recipe.validationConfiguration
+            case .advancedModel(let recipe): return recipe.validationConfiguration
             }
         }
 
@@ -724,6 +818,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         case run(AnalysisRun)
         case evidence(EvidenceSnapshot)
         case advancedEvidence(AdvancedModelEvidence)
+        case comparison(ComparativeEvidence)
         case figure(FigureAnnotation)
         case note(String)
     }
@@ -784,6 +879,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             case .run(let run): return run.isValid
             case .evidence(let evidence): return evidence.isValid
             case .advancedEvidence(let evidence): return evidence.isValid
+            case .comparison(let comparison): return comparison.isValid
             case .figure(let figure): return figure.isValid
             case .note(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -894,7 +990,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                     preparation.append(block.id)
                 case .validationPlan, .model, .advancedModel:
                     methods.append(block.id)
-                case .run, .evidence, .advancedEvidence, .figure, .note:
+                case .run, .evidence, .advancedEvidence, .comparison, .figure, .note:
                     evidence.append(block.id)
                 }
             }
@@ -1208,6 +1304,59 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         return blocks.filter { !assigned.contains($0.id) }
     }
 
+    /// Completed advanced runs that carry frozen held-out validation evidence.
+    /// These are the only runs eligible for a paired comparison block.
+    public var comparisonCandidateRunBlocks: [Block] {
+        blocks.filter { block in
+            guard block.state == .current, case .run(let run) = block.payload,
+                  run.status == .completed, case .advancedModel = run.recipe else { return false }
+            return advancedEvidenceBlock(forRunBlockID: block.id) != nil
+        }
+    }
+
+    /// Add one immutable comparison block. The block retains both runs and
+    /// evidence blocks as direct inputs, so later upstream edits make the
+    /// comparison visibly stale rather than silently reusing it.
+    @discardableResult
+    public mutating func recordComparativeEvidence(
+        baselineRunBlockID: UUID, candidateRunBlockID: UUID, at date: Date = Date()
+    ) throws -> UUID {
+        guard baselineRunBlockID != candidateRunBlockID,
+              let baselineRunBlock = blocks.first(where: { $0.id == baselineRunBlockID }),
+              let candidateRunBlock = blocks.first(where: { $0.id == candidateRunBlockID }),
+              baselineRunBlock.state == .current, candidateRunBlock.state == .current,
+              case .run(let baselineRun) = baselineRunBlock.payload,
+              case .run(let candidateRun) = candidateRunBlock.payload,
+              baselineRun.status == .completed, candidateRun.status == .completed,
+              case .advancedModel = baselineRun.recipe, case .advancedModel = candidateRun.recipe,
+              let baselineEvidenceBlock = advancedEvidenceBlock(forRunBlockID: baselineRunBlockID),
+              let candidateEvidenceBlock = advancedEvidenceBlock(forRunBlockID: candidateRunBlockID),
+              baselineEvidenceBlock.state == .current, candidateEvidenceBlock.state == .current,
+              case .advancedEvidence(let baselineEvidence) = baselineEvidenceBlock.payload,
+              case .advancedEvidence(let candidateEvidence) = candidateEvidenceBlock.payload else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let comparison = try makeComparativeEvidence(
+            baselineRun: baselineRun, candidateRun: candidateRun,
+            baselineEvidence: baselineEvidence, candidateEvidence: candidateEvidence,
+            baselineRunBlockID: baselineRunBlockID, candidateRunBlockID: candidateRunBlockID,
+            baselineEvidenceBlockID: baselineEvidenceBlock.id,
+            candidateEvidenceBlockID: candidateEvidenceBlock.id, at: date
+        )
+        let title = comparison.verdict == .comparable
+            ? "Paired model comparison" : "Non-comparable model comparison"
+        let block = try Block(
+            title: title,
+            upstreamBlockIDs: [
+                baselineRunBlockID, candidateRunBlockID,
+                baselineEvidenceBlock.id, candidateEvidenceBlock.id,
+            ],
+            payload: .comparison(comparison), createdAt: date, updatedAt: date
+        )
+        try append(block, at: date)
+        return block.id
+    }
+
     /// Review status is deliberately separate from execution freshness. This
     /// summary exposes both so a visual "ready" badge cannot hide stale work
     /// or an unresolved blocker.
@@ -1348,6 +1497,75 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    private func advancedEvidenceBlock(forRunBlockID runBlockID: UUID) -> Block? {
+        blocks.first { block in
+            block.upstreamBlockIDs == [runBlockID]
+                && ({ if case .advancedEvidence = block.payload { return true }; return false }())
+        }
+    }
+
+    private func makeComparativeEvidence(
+        baselineRun: AnalysisRun, candidateRun: AnalysisRun,
+        baselineEvidence: AdvancedModelEvidence, candidateEvidence: AdvancedModelEvidence,
+        baselineRunBlockID: UUID, candidateRunBlockID: UUID,
+        baselineEvidenceBlockID: UUID, candidateEvidenceBlockID: UUID, at date: Date
+    ) throws -> ComparativeEvidence {
+        func unavailable(_ verdict: ComparativeEvidence.Verdict) throws -> ComparativeEvidence {
+            try ComparativeEvidence(
+                capturedAt: date, baselineRunBlockID: baselineRunBlockID,
+                candidateRunBlockID: candidateRunBlockID,
+                baselineEvidenceBlockID: baselineEvidenceBlockID,
+                candidateEvidenceBlockID: candidateEvidenceBlockID,
+                sourceFingerprint: source.fingerprint, verdict: verdict
+            )
+        }
+        guard baselineRun.sourceFingerprint == candidateRun.sourceFingerprint,
+              baselineEvidence.sourceFingerprint == candidateEvidence.sourceFingerprint,
+              baselineRun.sourceFingerprint == baselineEvidence.sourceFingerprint else {
+            return try unavailable(.sourceFingerprintMismatch)
+        }
+        guard baselineRun.transformationBlockIDs == candidateRun.transformationBlockIDs else {
+            return try unavailable(.transformationLineageMismatch)
+        }
+        guard baselineRun.scaleSelection == candidateRun.scaleSelection else {
+            return try unavailable(.scaleSelectionMismatch)
+        }
+        let baselineConfiguration = baselineRun.recipe.validationConfiguration
+        let candidateConfiguration = candidateRun.recipe.validationConfiguration
+        guard baselineConfiguration.foldCount == candidateConfiguration.foldCount,
+              baselineConfiguration.partitioning == candidateConfiguration.partitioning,
+              baselineConfiguration.seed == candidateConfiguration.seed else {
+            return try unavailable(.validationConfigurationMismatch)
+        }
+        guard let baselineValidation = baselineEvidence.validation,
+              let candidateValidation = candidateEvidence.validation else {
+            return try unavailable(.validationUnavailable)
+        }
+        let paired = ModelComparison.compare(baseline: baselineValidation, candidate: candidateValidation)
+        let verdict: ComparativeEvidence.Verdict
+        switch paired.status {
+        case .comparable: verdict = .comparable
+        case .responseFamilyMismatch: verdict = .responseFamilyMismatch
+        case .heldOutObservationsMismatch: verdict = .heldOutObservationsMismatch
+        case .foldAssignmentMismatch: verdict = .foldAssignmentMismatch
+        }
+        guard verdict == .comparable else { return try unavailable(verdict) }
+        return try ComparativeEvidence(
+            capturedAt: date, baselineRunBlockID: baselineRunBlockID,
+            candidateRunBlockID: candidateRunBlockID,
+            baselineEvidenceBlockID: baselineEvidenceBlockID,
+            candidateEvidenceBlockID: candidateEvidenceBlockID,
+            sourceFingerprint: source.fingerprint, verdict: .comparable,
+            responseFamily: paired.responseFamily,
+            baselinePrimaryScore: paired.baselinePrimaryScore,
+            candidatePrimaryScore: paired.candidatePrimaryScore,
+            meanLossDifference: paired.meanLossDifference,
+            candidateWinCount: paired.candidateWinCount,
+            baselineWinCount: paired.baselineWinCount, tieCount: paired.tieCount,
+            pairedObservationCount: paired.pairedLosses.count
+        )
+    }
+
     /// Transformations are retained in document order, which is the replay
     /// order. Non-transformation ancestors (such as the chart model a unified
     /// model descends from) deliberately do not enter the snapshot.
@@ -1403,9 +1621,10 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // validation-plan blocks and optional model-plan links; version 6
         // predates composition sections; version 7 predates explicit scaled
         // fit policy and observed scale selection; version 8 predates portable
-        // review findings and explicit readiness. Existing representation is
-        // unchanged, so normalize on open and write the upgraded schema only
-        // when the host later saves.
+        // review findings and explicit readiness; version 9 predates frozen
+        // comparative evidence. Existing representation is unchanged, so
+        // normalize on open and write the upgraded schema only when the host
+        // later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }
@@ -1468,6 +1687,10 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                       (hasDirectAdvancedModelDependency(block) || hasDirectCompletedAdvancedRunDependency(block)) else {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
+            }
+            if case .comparison(let comparison) = block.payload,
+               !isValidComparisonDependency(block, comparison: comparison) {
+                throw AnalysisDocumentError.invalidEvidence(block.id)
             }
             if case .model(let recipe) = block.payload,
                !hasValidValidationPlanDependency(
@@ -1542,6 +1765,40 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             return false
         }
         return true
+    }
+
+    private func isValidComparisonDependency(_ block: Block, comparison: ComparativeEvidence) -> Bool {
+        let expectedInputs = [
+            comparison.baselineRunBlockID, comparison.candidateRunBlockID,
+            comparison.baselineEvidenceBlockID, comparison.candidateEvidenceBlockID,
+        ]
+        guard block.upstreamBlockIDs == expectedInputs,
+              let baselineRunBlock = blocks.first(where: { $0.id == comparison.baselineRunBlockID }),
+              let candidateRunBlock = blocks.first(where: { $0.id == comparison.candidateRunBlockID }),
+              let baselineEvidenceBlock = blocks.first(where: { $0.id == comparison.baselineEvidenceBlockID }),
+              let candidateEvidenceBlock = blocks.first(where: { $0.id == comparison.candidateEvidenceBlockID }),
+              case .run(let baselineRun) = baselineRunBlock.payload,
+              case .run(let candidateRun) = candidateRunBlock.payload,
+              baselineRun.status == .completed, candidateRun.status == .completed,
+              case .advancedModel = baselineRun.recipe, case .advancedModel = candidateRun.recipe,
+              baselineEvidenceBlock.upstreamBlockIDs == [baselineRunBlock.id],
+              candidateEvidenceBlock.upstreamBlockIDs == [candidateRunBlock.id],
+              case .advancedEvidence(let baselineEvidence) = baselineEvidenceBlock.payload,
+              case .advancedEvidence(let candidateEvidence) = candidateEvidenceBlock.payload else {
+            return false
+        }
+        // Historical comparisons remain readable after upstream edits. Current
+        // comparisons must still exactly reflect the preserved inputs.
+        guard block.state == .current else { return true }
+        guard comparison.sourceFingerprint == source.fingerprint else { return false }
+        guard let expected = try? makeComparativeEvidence(
+            baselineRun: baselineRun, candidateRun: candidateRun,
+            baselineEvidence: baselineEvidence, candidateEvidence: candidateEvidence,
+            baselineRunBlockID: baselineRunBlock.id, candidateRunBlockID: candidateRunBlock.id,
+            baselineEvidenceBlockID: baselineEvidenceBlock.id,
+            candidateEvidenceBlockID: candidateEvidenceBlock.id, at: comparison.capturedAt
+        ) else { return false }
+        return expected == comparison
     }
 
     private func hasDirectCompletedRunDependency(_ block: Block) -> Bool {
