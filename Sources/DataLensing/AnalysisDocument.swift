@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public let id: UUID
     public let schemaVersion: Int
@@ -131,6 +131,143 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         case greaterThan
     }
 
+    /// A reusable, declarative validation policy for one or more model blocks.
+    ///
+    /// The plan carries only the choices that should remain comparable across
+    /// models: fold construction, deterministic seed, optional bootstrap
+    /// policy, and an optional comparison cohort. A model recipe stores the
+    /// plan's *resolved* configuration with its exact statistical
+    /// specification, so a replay does not depend on mutable notebook state.
+    public struct ValidationPlan: Codable, Sendable, Hashable {
+        public enum IntendedUse: String, Codable, Sendable, Hashable {
+            /// Independently exchangeable observations use shuffled folds.
+            case exchangeable
+            /// Ordered source rows use contiguous blocked folds, for example
+            /// after an explicit temporal or spatial ordering transformation.
+            case orderedOrSpatial
+            /// Binary outcomes use stratified folds to preserve both classes.
+            case binaryClassification
+        }
+
+        /// Optional deterministic bootstrap policy for stability evidence.
+        public struct BootstrapPolicy: Codable, Sendable, Hashable {
+            public let replicateCount: Int
+            public let minimumSuccessFraction: Double
+            public let confidenceLevel: Double
+            public let seed: UInt64
+
+            public init(
+                replicateCount: Int = 50, minimumSuccessFraction: Double = 0.8,
+                confidenceLevel: Double = 0.95, seed: UInt64 = 0
+            ) throws {
+                guard replicateCount >= 2,
+                      (0...1).contains(minimumSuccessFraction),
+                      confidenceLevel > 0, confidenceLevel < 1 else {
+                    throw AnalysisDocumentError.invalidConfiguration
+                }
+                self.replicateCount = replicateCount
+                self.minimumSuccessFraction = minimumSuccessFraction
+                self.confidenceLevel = confidenceLevel
+                self.seed = seed
+            }
+
+            fileprivate var isValid: Bool {
+                replicateCount >= 2 && (0...1).contains(minimumSuccessFraction)
+                    && confidenceLevel > 0 && confidenceLevel < 1
+            }
+
+            fileprivate func configuration(
+                for specification: StatisticalModelSpecification
+            ) -> BootstrapConfiguration {
+                BootstrapConfiguration(
+                    replicateCount: replicateCount,
+                    minimumSuccessFraction: minimumSuccessFraction,
+                    confidenceLevel: confidenceLevel, seed: seed,
+                    specification: specification
+                )
+            }
+        }
+
+        public let intendedUse: IntendedUse
+        public let foldCount: Int
+        public let partitioning: ValidationPartitioning
+        public let seed: UInt64
+        public let bootstrap: BootstrapPolicy?
+        /// A human-chosen label for models deliberately assessed on the same
+        /// folds. It is provenance, not a claim that a comparison is valid.
+        public let comparisonCohort: String?
+
+        public init(
+            intendedUse: IntendedUse, foldCount: Int = 5,
+            partitioning: ValidationPartitioning, seed: UInt64 = 0,
+            bootstrap: BootstrapPolicy? = nil, comparisonCohort: String? = nil
+        ) throws {
+            let normalizedCohort = comparisonCohort?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard foldCount >= 2, Self.accepts(partitioning, for: intendedUse),
+                  normalizedCohort?.isEmpty != true else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.intendedUse = intendedUse
+            self.foldCount = foldCount
+            self.partitioning = partitioning
+            self.seed = seed
+            self.bootstrap = bootstrap
+            self.comparisonCohort = normalizedCohort
+        }
+
+        /// Resolve the reusable policy for the exact model being fitted.
+        public func validationConfiguration(
+            for specification: StatisticalModelSpecification
+        ) -> ValidationConfiguration {
+            ValidationConfiguration(
+                foldCount: foldCount, partitioning: partitioning, seed: seed,
+                specification: specification
+            )
+        }
+
+        /// Resolve a stability policy for the exact model being fitted.
+        public func bootstrapConfiguration(
+            for specification: StatisticalModelSpecification
+        ) -> BootstrapConfiguration? {
+            bootstrap?.configuration(for: specification)
+        }
+
+        /// Plans are comparable only when explicitly placed in one cohort and
+        /// use the same partition construction and seed.
+        public func isComparable(to other: ValidationPlan) -> Bool {
+            comparisonCohort != nil && comparisonCohort == other.comparisonCohort
+                && foldCount == other.foldCount && partitioning == other.partitioning
+                && seed == other.seed
+        }
+
+        /// Binary-stratified plans may only validate binomial specifications.
+        /// Other plan intents constrain fold construction, not model family.
+        public func supports(_ specification: StatisticalModelSpecification) -> Bool {
+            guard intendedUse == .binaryClassification else { return true }
+            switch specification.strategy {
+            case .additiveBinomial, .multivariateBinomial: return true
+            default: return false
+            }
+        }
+
+        fileprivate var isValid: Bool {
+            foldCount >= 2 && Self.accepts(partitioning, for: intendedUse)
+                && bootstrap?.isValid != false
+                && comparisonCohort?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true
+        }
+
+        private static func accepts(
+            _ partitioning: ValidationPartitioning, for intendedUse: IntendedUse
+        ) -> Bool {
+            switch intendedUse {
+            case .exchangeable: return partitioning == .shuffled
+            case .orderedOrSpatial: return partitioning == .blocked
+            case .binaryClassification: return partitioning == .stratifiedBinary
+            }
+        }
+    }
+
     /// A persisted chart-model recipe derived from a replayable workbench session.
     public struct ModelRecipe: Codable, Sendable, Hashable {
         public let predictor: String
@@ -140,11 +277,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let smoother: String
         public let tuning: WorkbenchTuning
         public let validationConfiguration: ValidationConfiguration
+        /// The first-class plan from which this exact configuration was resolved.
+        public let validationPlanBlockID: UUID?
 
         public init(
             predictor: String, response: String, secondPredictor: String? = nil,
             smoother: SmootherChoice, tuning: WorkbenchTuning,
-            validationConfiguration: ValidationConfiguration
+            validationConfiguration: ValidationConfiguration,
+            validationPlanBlockID: UUID? = nil
         ) throws {
             guard Self.isValidColumnName(predictor), Self.isValidColumnName(response),
                   predictor != response,
@@ -159,6 +299,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             self.smoother = smoother.rawValue
             self.tuning = tuning
             self.validationConfiguration = validationConfiguration
+            self.validationPlanBlockID = validationPlanBlockID
         }
 
         public init(session: WorkbenchSession) throws {
@@ -195,6 +336,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let responseColumn: String
         public let specification: StatisticalModelSpecification
         public let validationConfiguration: ValidationConfiguration
+        /// The first-class plan from which validation/bootstrap policy was resolved.
+        public let validationPlanBlockID: UUID?
         /// `nil` means stability resampling was intentionally not requested.
         public let bootstrapConfiguration: BootstrapConfiguration?
         /// Prediction rows for bootstrap stability intervals, in predictor order.
@@ -205,7 +348,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             specification: StatisticalModelSpecification,
             validationConfiguration: ValidationConfiguration,
             bootstrapConfiguration: BootstrapConfiguration? = nil,
-            stabilityQueries: [[Double]] = []
+            stabilityQueries: [[Double]] = [], validationPlanBlockID: UUID? = nil
         ) throws {
             guard !predictorColumns.isEmpty,
                   Set(predictorColumns).count == predictorColumns.count,
@@ -224,6 +367,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             self.responseColumn = responseColumn
             self.specification = specification
             self.validationConfiguration = validationConfiguration
+            self.validationPlanBlockID = validationPlanBlockID
             self.bootstrapConfiguration = bootstrapConfiguration
             self.stabilityQueries = stabilityQueries
         }
@@ -531,6 +675,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
 
     public enum BlockPayload: Codable, Sendable, Hashable {
         case transformation(Transformation)
+        case validationPlan(ValidationPlan)
         case model(ModelRecipe)
         case advancedModel(AdvancedModelRecipe)
         case run(AnalysisRun)
@@ -590,6 +735,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         fileprivate static func isValid(_ payload: BlockPayload) -> Bool {
             switch payload {
             case .transformation(let transformation): return transformation.isValid
+            case .validationPlan(let plan): return plan.isValid
             case .model(let recipe): return recipe.isValid
             case .advancedModel(let recipe): return recipe.isValid
             case .run(let run): return run.isValid
@@ -686,6 +832,21 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }?.id
     }
 
+    /// Validation-plan blocks in notebook order, suitable for a host picker.
+    public var validationPlanBlocks: [Block] {
+        blocks.filter {
+            if case .validationPlan = $0.payload { return true }
+            return false
+        }
+    }
+
+    /// Find a reusable validation plan by its stable notebook-block identity.
+    public func validationPlan(blockID: UUID) -> ValidationPlan? {
+        guard let block = blocks.first(where: { $0.id == blockID }),
+              case .validationPlan(let plan) = block.payload else { return nil }
+        return plan
+    }
+
     private func runRecipe(for modelBlockID: UUID) -> AnalysisRunRecipe? {
         guard let block = blocks.first(where: { $0.id == modelBlockID }) else { return nil }
         switch block.payload {
@@ -742,9 +903,10 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
         // Versions 1 and 2 predate advanced model/evidence blocks; version 3
         // predates native sparse-execution evidence; version 4 predates
-        // explicit immutable run records. Their
-        // existing representation is unchanged, so normalize on open and
-        // write the upgraded schema only when the host later saves.
+        // explicit immutable run records; version 5 predates reusable
+        // validation-plan blocks and optional model-plan links. Existing
+        // representation is unchanged, so normalize on open and write the
+        // upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }
@@ -791,6 +953,21 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                     throw AnalysisDocumentError.invalidEvidence(block.id)
                 }
             }
+            if case .model(let recipe) = block.payload,
+               !hasValidValidationPlanDependency(
+                block, planBlockID: recipe.validationPlanBlockID,
+                validation: recipe.validationConfiguration, bootstrap: nil
+               ) {
+                throw AnalysisDocumentError.invalidDependency(block.id)
+            }
+            if case .advancedModel(let recipe) = block.payload,
+               !hasValidValidationPlanDependency(
+                block, planBlockID: recipe.validationPlanBlockID,
+                validation: recipe.validationConfiguration,
+                bootstrap: recipe.bootstrapConfiguration
+               ) {
+                throw AnalysisDocumentError.invalidDependency(block.id)
+            }
             if case .run(let run) = block.payload,
                !isValidRunDependency(block, run: run) {
                 throw AnalysisDocumentError.invalidDependency(block.id)
@@ -801,6 +978,24 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             }
             preceding.insert(block.id)
         }
+    }
+
+    /// A plan reference is intentionally a direct model input. Current models
+    /// must exactly equal the resolved plan; stale historical models remain
+    /// readable after a plan has been edited, like evidence after a source edit.
+    private func hasValidValidationPlanDependency(
+        _ block: Block, planBlockID: UUID?, validation: ValidationConfiguration,
+        bootstrap: BootstrapConfiguration?
+    ) -> Bool {
+        guard let planBlockID else { return true }
+        guard block.upstreamBlockIDs.contains(planBlockID),
+              let plan = validationPlan(blockID: planBlockID) else { return false }
+        guard block.state == .stale else {
+            return plan.supports(validation.specification)
+                && plan.validationConfiguration(for: validation.specification) == validation
+                && plan.bootstrapConfiguration(for: validation.specification) == bootstrap
+        }
+        return true
     }
 
     private func hasDirectModelDependency(_ block: Block) -> Bool {

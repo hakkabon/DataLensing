@@ -219,8 +219,13 @@ evidence depend on that run block, so a later recomputation cannot overwrite or
 silently reassign prior evidence. Editing an upstream block marks historic runs
 stale while preserving their recorded inputs and outcome.
 
-The next notebook steps are reusable validation plans, followed by review-ready
-comparisons and annotations tied to frozen evidence blocks.
+Validation plans are now first-class notebook blocks. A plan records fold
+construction (shuffled, blocked ordered/spatial, or binary-stratified), its
+deterministic seed, optional bootstrap policy, and an optional comparison cohort.
+Models retain the plan's resolved configuration alongside their exact statistical
+specification; changing a plan makes dependent models and runs visibly stale
+while preserving their immutable historical snapshots. The next notebook step is
+review-ready, paired model-comparison evidence tied to those frozen runs.
 
 The scheduled `Ecosystem compatibility` workflow checks source-head builds of
 DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in

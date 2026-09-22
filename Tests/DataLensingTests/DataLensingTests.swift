@@ -1130,6 +1130,90 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 
+@Test func validationPlansAreReusableNotebookInputsWithHistoricalRunSnapshots() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,2\n2,3\n3,5\n4,6\n5,8\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let specification = StatisticalModelSpecification(
+        strategy: .additiveGaussian,
+        additive: AdditiveModelSpecification(terms: [.init(predictorIndex: 0)])
+    )
+    let policy = try AnalysisDocument.ValidationPlan.BootstrapPolicy(
+        replicateCount: 8, minimumSuccessFraction: 0.75,
+        confidenceLevel: 0.9, seed: 23
+    )
+    let plan = try AnalysisDocument.ValidationPlan(
+        intendedUse: .orderedOrSpatial, foldCount: 3, partitioning: .blocked,
+        seed: 17, bootstrap: policy, comparisonCohort: "candidate-gams"
+    )
+    let planBlock = try AnalysisDocument.Block(title: "Ordered GAM assessment", payload: .validationPlan(plan))
+    let recipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: specification,
+        validationConfiguration: plan.validationConfiguration(for: specification),
+        bootstrapConfiguration: plan.bootstrapConfiguration(for: specification),
+        stabilityQueries: [[2.5]], validationPlanBlockID: planBlock.id
+    )
+    let modelBlock = try AnalysisDocument.Block(
+        title: "Candidate GAM", upstreamBlockIDs: [planBlock.id], payload: .advancedModel(recipe)
+    )
+    var document = try AnalysisDocument(
+        title: "Reusable validation", source: source, blocks: [planBlock, modelBlock]
+    )
+    #expect(document.validationPlanBlocks == [planBlock])
+    #expect(document.validationPlan(blockID: planBlock.id) == plan)
+    #expect(plan.isComparable(to: plan))
+
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let run = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: modelBlock.id, retainedObservationCount: 6,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1)
+    )
+    let runBlock = try AnalysisDocument.Block(
+        title: "Validated GAM run", upstreamBlockIDs: [modelBlock.id], payload: .run(run)
+    )
+    try document.append(runBlock)
+    #expect(run.recipe == .advancedModel(recipe))
+    #expect(run.validationSeed == 17)
+    #expect(run.bootstrapSeed == 23)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+
+    let revisedPlan = try AnalysisDocument.ValidationPlan(
+        intendedUse: .orderedOrSpatial, foldCount: 5, partitioning: .blocked,
+        seed: 17, bootstrap: policy, comparisonCohort: "candidate-gams"
+    )
+    let stale = try document.update(blockID: planBlock.id, payload: .validationPlan(revisedPlan))
+    #expect(stale == Set([modelBlock.id, runBlock.id]))
+    #expect(document.blocks[1].state == .stale)
+    #expect(document.blocks[2].state == .stale)
+    #expect(run.recipe == .advancedModel(recipe))
+}
+
+@Test func currentModelsRejectMismatchedValidationPlanResolution() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,2\n2,3\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let specification = StatisticalModelSpecification(
+        strategy: .additiveGaussian,
+        additive: AdditiveModelSpecification(terms: [.init(predictorIndex: 0)])
+    )
+    let plan = try AnalysisDocument.ValidationPlan(
+        intendedUse: .orderedOrSpatial, foldCount: 3, partitioning: .blocked, seed: 4
+    )
+    let planBlock = try AnalysisDocument.Block(title: "Blocked folds", payload: .validationPlan(plan))
+    let recipe = try AnalysisDocument.AdvancedModelRecipe(
+        predictorColumns: ["x"], responseColumn: "y", specification: specification,
+        validationConfiguration: ValidationConfiguration(
+            foldCount: 5, partitioning: .blocked, seed: 4, specification: specification
+        ), validationPlanBlockID: planBlock.id
+    )
+    let modelBlock = try AnalysisDocument.Block(
+        title: "Mismatched model", upstreamBlockIDs: [planBlock.id], payload: .advancedModel(recipe)
+    )
+    #expect(throws: AnalysisDocumentError.invalidDependency(modelBlock.id)) {
+        _ = try AnalysisDocument(title: "Invalid plan reference", source: source, blocks: [planBlock, modelBlock])
+    }
+}
+
 @Test func advancedDocumentMultivariateFitRecordsActualSolverBackend() throws {
     var rows: [String] = []
     for index in 0..<42 {

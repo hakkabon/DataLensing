@@ -86,6 +86,37 @@ private enum AdvancedStrategyChoice: String, CaseIterable, Identifiable {
         default: false
         }
     }
+
+    var isBinomial: Bool {
+        switch self {
+        case .binomialGAM, .binomialMultivariate: return true
+        default: return false
+        }
+    }
+}
+
+private enum ValidationPlanIntentChoice: String, CaseIterable, Identifiable {
+    case exchangeable = "Shuffled / exchangeable"
+    case orderedOrSpatial = "Blocked / ordered"
+    case binaryClassification = "Stratified / binary"
+
+    var id: String { rawValue }
+
+    var intendedUse: AnalysisDocument.ValidationPlan.IntendedUse {
+        switch self {
+        case .exchangeable: return .exchangeable
+        case .orderedOrSpatial: return .orderedOrSpatial
+        case .binaryClassification: return .binaryClassification
+        }
+    }
+
+    var partitioning: ValidationPartitioning {
+        switch self {
+        case .exchangeable: return .shuffled
+        case .orderedOrSpatial: return .blocked
+        case .binaryClassification: return .stratifiedBinary
+        }
+    }
 }
 
 struct ContentView: View {
@@ -139,6 +170,13 @@ struct ContentView: View {
     @State private var advancedStrategy: AdvancedStrategyChoice = .gaussianGAM
     @State private var advancedSolver: MultivariateSolverPreference = .automatic
     @State private var advancedBootstrap = false
+    @State private var validationPlanName = "Validation plan"
+    @State private var validationPlanIntent: ValidationPlanIntentChoice = .orderedOrSpatial
+    @State private var validationPlanFoldCount = 5
+    @State private var validationPlanSeed = "0"
+    @State private var validationPlanBootstrap = false
+    @State private var validationPlanCohort = ""
+    @State private var selectedValidationPlanBlockID: UUID?
     @State private var advancedTask: Task<Void, Never>?
     @State private var advancedLoading = false
 
@@ -291,6 +329,44 @@ struct ContentView: View {
                     }
                     .disabled(documentRecomputing || document.latestModelBlockID == nil)
 
+                    Divider()
+                    Text("Validation plans are reusable, saved fold and stability policies.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    TextField("Plan name", text: $validationPlanName)
+                        .font(.caption)
+                    Picker("Fold assignment", selection: $validationPlanIntent) {
+                        ForEach(ValidationPlanIntentChoice.allCases) { choice in
+                            Text(choice.rawValue).tag(choice)
+                        }
+                    }
+                    Picker("Folds", selection: $validationPlanFoldCount) {
+                        ForEach([2, 3, 5, 10], id: \.self) { count in
+                            Text("\(count)").tag(count)
+                        }
+                    }
+                    TextField("Validation seed", text: $validationPlanSeed)
+                        .font(.caption)
+                    Toggle("Include bootstrap stability (50)", isOn: $validationPlanBootstrap)
+                    TextField("Comparison cohort (optional)", text: $validationPlanCohort)
+                        .font(.caption)
+                    Button {
+                        appendValidationPlan()
+                    } label: {
+                        Label("Save Validation Plan", systemImage: "checklist.checked")
+                    }
+                    .disabled(documentRecomputing || advancedLoading)
+
+                    if !document.validationPlanBlocks.isEmpty {
+                        Picker("Advanced validation", selection: $selectedValidationPlanBlockID) {
+                            Text("Embedded validation").tag(UUID?.none)
+                            ForEach(document.validationPlanBlocks) { block in
+                                Text(block.title).tag(Optional(block.id))
+                            }
+                        }
+                        .font(.caption)
+                    }
+
                     if case .ready(let built) = phase {
                         Button("Update Recipe from Visible Chart") {
                             updateDocumentRecipe(from: built)
@@ -316,7 +392,7 @@ struct ContentView: View {
                                 Text("Dense QR").tag(MultivariateSolverPreference.denseQR)
                                 Text("Sparse CGLS").tag(MultivariateSolverPreference.sparseCGLS)
                             }
-                        } else {
+                        } else if selectedValidationPlanBlockID == nil {
                             Toggle("Bootstrap stability (50)", isOn: $advancedBootstrap)
                         }
                         Button {
@@ -331,6 +407,8 @@ struct ContentView: View {
                         .disabled(
                             documentRecomputing || advancedLoading || documentSourceURL != built.fileURL
                                 || (advancedStrategy.requiresSecondPredictor && selectedX2 == nil)
+                                || (advancedStrategy.requiresSecondPredictor && selectedValidationPlanHasBootstrap(in: document))
+                                || selectedValidationPlanIsIncompatible(in: document)
                         )
                     }
 
@@ -828,6 +906,49 @@ struct ContentView: View {
         return nil
     }
 
+    private func selectedValidationPlan(in document: AnalysisDocument) -> AnalysisDocument.ValidationPlan? {
+        guard let selectedValidationPlanBlockID else { return nil }
+        return document.validationPlan(blockID: selectedValidationPlanBlockID)
+    }
+
+    private func selectedValidationPlanHasBootstrap(in document: AnalysisDocument) -> Bool {
+        selectedValidationPlan(in: document)?.bootstrap != nil
+    }
+
+    private func selectedValidationPlanIsIncompatible(in document: AnalysisDocument) -> Bool {
+        guard let plan = selectedValidationPlan(in: document) else { return false }
+        return plan.intendedUse == .binaryClassification && !advancedStrategy.isBinomial
+    }
+
+    private func appendValidationPlan() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            guard let seed = UInt64(validationPlanSeed.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            let bootstrap = validationPlanBootstrap
+                ? try AnalysisDocument.ValidationPlan.BootstrapPolicy(seed: seed)
+                : nil
+            let plan = try AnalysisDocument.ValidationPlan(
+                intendedUse: validationPlanIntent.intendedUse,
+                foldCount: validationPlanFoldCount, partitioning: validationPlanIntent.partitioning,
+                seed: seed, bootstrap: bootstrap,
+                comparisonCohort: validationPlanCohort
+            )
+            let title = validationPlanName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let block = try AnalysisDocument.Block(
+                title: title.isEmpty ? "Validation plan" : title,
+                payload: .validationPlan(plan)
+            )
+            try document.append(block)
+            analysisDocument = document
+            selectedValidationPlanBlockID = block.id
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
     @ViewBuilder
     private func numericalExecutionPanel(for document: AnalysisDocument) -> some View {
         if let evidence = latestAdvancedEvidence(in: document),
@@ -886,6 +1007,7 @@ struct ContentView: View {
     private func documentBlockSymbol(_ block: AnalysisDocument.Block) -> String {
         switch block.payload {
         case .transformation: "line.3.horizontal.decrease.circle"
+        case .validationPlan: "checklist.checked"
         case .model: "function"
         case .advancedModel: "function"
         case .run: "play.circle"
@@ -899,6 +1021,11 @@ struct ContentView: View {
     private func documentBlockDetail(_ block: AnalysisDocument.Block) -> String {
         switch block.payload {
         case .transformation: return "Replayable transformation"
+        case .validationPlan(let plan):
+            let bootstrap = plan.bootstrap.map { "bootstrap \($0.replicateCount)" }
+            let cohort = plan.comparisonCohort.map { "cohort \($0)" }
+            return [plan.partitioning.rawValue, "\(plan.foldCount) folds", "seed \(plan.seed)", bootstrap, cohort]
+                .compactMap { $0 }.joined(separator: " · ")
         case .model(let recipe): return "\(recipe.smoother) · \(recipe.predictor) → \(recipe.response)"
         case .advancedModel(let recipe):
             return "\(recipe.specification.strategy.rawValue) · \(recipe.predictorColumns.joined(separator: ", ")) → \(recipe.responseColumn)"
@@ -1156,7 +1283,9 @@ struct ContentView: View {
         return .fittedCurve
     }
 
-    private func advancedRecipe(for built: BuiltChart) throws -> AnalysisDocument.AdvancedModelRecipe {
+    private func advancedRecipe(
+        for built: BuiltChart, document: AnalysisDocument
+    ) throws -> AnalysisDocument.AdvancedModelRecipe {
         var predictors = [built.controller.xName]
         if advancedStrategy.requiresSecondPredictor {
             guard let selectedX2, selectedX2 != built.controller.xName else {
@@ -1199,14 +1328,23 @@ struct ContentView: View {
                 )
             )
         }
+        let plan = selectedValidationPlan(in: document)
+        guard plan?.supports(specification) ?? true else {
+            throw AnalysisDocumentExecutionError.invalidModelRecipe
+        }
         let partitioning: ValidationPartitioning = strategy == .additiveBinomial
             || strategy == .multivariateBinomial ? .stratifiedBinary : .blocked
-        let validation = ValidationConfiguration(
-            foldCount: 5, partitioning: partitioning, specification: specification
-        )
+        let validation = plan?.validationConfiguration(for: specification)
+            ?? ValidationConfiguration(
+                foldCount: 5, partitioning: partitioning, specification: specification
+            )
         let query: [[Double]]
         let bootstrap: BootstrapConfiguration?
-        if advancedBootstrap && !advancedStrategy.requiresSecondPredictor {
+        let wantsBootstrap = plan?.bootstrap != nil || advancedBootstrap
+        if wantsBootstrap && advancedStrategy.requiresSecondPredictor {
+            throw AnalysisDocumentExecutionError.invalidModelRecipe
+        }
+        if wantsBootstrap {
             guard
                   let median = built.loaded.model.rawX.sorted().dropFirst(
                       max(0, built.loaded.model.rawX.count - 1) / 2
@@ -1214,9 +1352,10 @@ struct ContentView: View {
                 throw AnalysisDocumentExecutionError.invalidModelRecipe
             }
             query = [[median]]
-            bootstrap = BootstrapConfiguration(
-                replicateCount: 50, minimumSuccessFraction: 0.8, specification: specification
-            )
+            bootstrap = plan?.bootstrapConfiguration(for: specification)
+                ?? BootstrapConfiguration(
+                    replicateCount: 50, minimumSuccessFraction: 0.8, specification: specification
+                )
         } else {
             query = []
             bootstrap = nil
@@ -1224,7 +1363,8 @@ struct ContentView: View {
         return try AnalysisDocument.AdvancedModelRecipe(
             predictorColumns: predictors, responseColumn: built.controller.yName,
             specification: specification, validationConfiguration: validation,
-            bootstrapConfiguration: bootstrap, stabilityQueries: query
+            bootstrapConfiguration: bootstrap, stabilityQueries: query,
+            validationPlanBlockID: plan == nil ? nil : selectedValidationPlanBlockID
         )
     }
 
@@ -1234,8 +1374,11 @@ struct ContentView: View {
         documentError = nil
         advancedLoading = true
         do {
-            let recipe = try advancedRecipe(for: built)
-            let upstream = document.latestModelBlockID.map { [$0] } ?? []
+            let recipe = try advancedRecipe(for: built, document: document)
+            var upstream = document.latestModelBlockID.map { [$0] } ?? []
+            if let validationPlanBlockID = recipe.validationPlanBlockID {
+                upstream.append(validationPlanBlockID)
+            }
             let modelBlock = try AnalysisDocument.Block(
                 title: advancedStrategy.rawValue, upstreamBlockIDs: upstream,
                 payload: .advancedModel(recipe)
