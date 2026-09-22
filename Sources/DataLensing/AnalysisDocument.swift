@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 11
 
     public let id: UUID
     public let schemaVersion: Int
@@ -609,6 +609,125 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// Numerical and package-resolution context captured with an explicit run.
+    ///
+    /// The record identifies the shipped numerical stack and runtime target;
+    /// it does not claim that a different platform or version is bitwise
+    /// equivalent. Hosts that know a release/build identifier should provide
+    /// it explicitly rather than relying on the conservative source-build
+    /// default.
+    public struct ExecutionEnvironment: Codable, Sendable, Hashable {
+        public let hostBuildIdentifier: String
+        public let swiftLanguageVersion: String
+        public let platform: String
+        public let architecture: String
+        public let swiftDataLensVersion: String
+        public let swiftNumericCoreVersion: String
+        public let rustNumericCoreVersion: String
+        /// Identifies this checked-in dependency resolution, not source data.
+        public let resolverFingerprint: String
+
+        public init(
+            hostBuildIdentifier: String, swiftLanguageVersion: String,
+            platform: String, architecture: String, swiftDataLensVersion: String,
+            swiftNumericCoreVersion: String, rustNumericCoreVersion: String,
+            resolverFingerprint: String
+        ) {
+            self.hostBuildIdentifier = hostBuildIdentifier
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.swiftLanguageVersion = swiftLanguageVersion
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.platform = platform.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.architecture = architecture.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.swiftDataLensVersion = swiftDataLensVersion
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.swiftNumericCoreVersion = swiftNumericCoreVersion
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.rustNumericCoreVersion = rustNumericCoreVersion
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.resolverFingerprint = resolverFingerprint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        /// Conservative default for the released dependency pins. A host app
+        /// may replace `hostBuildIdentifier` with its own release/build value.
+        public static var current: ExecutionEnvironment {
+            let hostBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                as? String ?? "source-build"
+            return ExecutionEnvironment(
+                hostBuildIdentifier: hostBuild, swiftLanguageVersion: "6.1",
+                platform: currentPlatform, architecture: currentArchitecture,
+                swiftDataLensVersion: "0.20.1", swiftNumericCoreVersion: "0.7.0",
+                rustNumericCoreVersion: "0.5.0",
+                resolverFingerprint: "7340f664b8540f45521740887225e5702b51b861dceb17f061fa3b50d9c31a9a"
+            )
+        }
+
+        fileprivate var isValid: Bool {
+            [hostBuildIdentifier, swiftLanguageVersion, platform, architecture,
+             swiftDataLensVersion, swiftNumericCoreVersion, rustNumericCoreVersion,
+             resolverFingerprint].allSatisfy { !$0.isEmpty }
+        }
+
+        private static var currentPlatform: String {
+            #if os(macOS)
+            return "macOS"
+            #elseif os(iOS)
+            return "iOS"
+            #elseif os(tvOS)
+            return "tvOS"
+            #elseif os(watchOS)
+            return "watchOS"
+            #elseif os(Linux)
+            return "Linux"
+            #else
+            return "unknown-platform"
+            #endif
+        }
+
+        private static var currentArchitecture: String {
+            #if arch(arm64)
+            return "arm64"
+            #elseif arch(x86_64)
+            return "x86_64"
+            #else
+            return "unknown-architecture"
+            #endif
+        }
+    }
+
+    /// A non-mutating, reader-facing comparison of two saved executions.
+    /// It distinguishes changed model choices from changed replay inputs or
+    /// numerical environments, which are more consequential for reproducibility.
+    public struct AnalysisRunDifference: Sendable, Hashable {
+        public enum EnvironmentStatus: String, Sendable, Hashable {
+            case exact
+            case changed
+            case unavailableInLegacyRun
+        }
+
+        public let baselineRunBlockID: UUID
+        public let candidateRunBlockID: UUID
+        public let sourceFingerprintMatches: Bool
+        public let transformationLineageMatches: Bool
+        public let validationTaskMatches: Bool
+        public let bootstrapSeedMatches: Bool
+        public let scalePolicyMatches: Bool
+        public let scaleSelectionMatches: Bool
+        public let solverPreferenceMatches: Bool
+        public let modelRecipeMatches: Bool
+        public let environmentStatus: EnvironmentStatus
+        public let baselineStatus: AnalysisRunStatus
+        public let candidateStatus: AnalysisRunStatus
+        public let baselineRetainedObservationCount: Int?
+        public let candidateRetainedObservationCount: Int?
+
+        public var replayInputsMatch: Bool {
+            sourceFingerprintMatches && transformationLineageMatches && validationTaskMatches
+                && scalePolicyMatches && scaleSelectionMatches
+        }
+    }
+
     /// The immutable outcome of one explicit analysis execution.
     public enum AnalysisRunStatus: String, Codable, Sendable, Hashable {
         case completed
@@ -671,6 +790,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public let requestedSolverPreference: MultivariateSolverPreference?
         /// Observed scale selection. `nil` remains readable for older runs.
         public let scaleSelection: StatisticalScaleSelection?
+        /// Resolved software/numerical stack for this execution. `nil` is a
+        /// readable legacy record that predates reproducibility closure.
+        public let executionEnvironment: ExecutionEnvironment?
         public let startedAt: Date
         public let completedAt: Date
         public let status: AnalysisRunStatus
@@ -684,7 +806,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             transformationBlockIDs: [UUID], recipe: AnalysisRunRecipe,
             startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
             retainedObservationCount: Int? = nil, failureDescription: String? = nil,
-            scaleSelection: StatisticalScaleSelection? = nil
+            scaleSelection: StatisticalScaleSelection? = nil,
+            executionEnvironment: ExecutionEnvironment? = ExecutionEnvironment.current
         ) throws {
             let validFailure: Bool
             switch status {
@@ -709,6 +832,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             bootstrapSeed = recipe.bootstrapSeed
             requestedSolverPreference = recipe.requestedSolverPreference
             self.scaleSelection = scaleSelection
+            self.executionEnvironment = executionEnvironment
             self.startedAt = startedAt
             self.completedAt = completedAt
             self.status = status
@@ -724,6 +848,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                   bootstrapSeed == recipe.bootstrapSeed,
                   requestedSolverPreference == recipe.requestedSolverPreference,
                   scaleSelection?.isValid ?? true,
+                  executionEnvironment?.isValid ?? true,
                   scaleSelection.map({ $0.policy == recipe.scalePolicy }) ?? true else { return false }
             switch status {
             case .completed:
@@ -739,26 +864,28 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         public static func completed(
             in document: AnalysisDocument, modelBlockID: UUID,
             retainedObservationCount: Int, startedAt: Date, completedAt: Date = Date(),
-            scaleSelection: StatisticalScaleSelection? = nil
+            scaleSelection: StatisticalScaleSelection? = nil,
+            executionEnvironment: ExecutionEnvironment? = ExecutionEnvironment.current
         ) throws -> AnalysisRun {
             try make(
                 in: document, modelBlockID: modelBlockID, startedAt: startedAt,
                 completedAt: completedAt, status: .completed,
                 retainedObservationCount: retainedObservationCount, failureDescription: nil,
-                scaleSelection: scaleSelection
+                scaleSelection: scaleSelection, executionEnvironment: executionEnvironment
             )
         }
 
         /// Capture a terminal failure without disguising it as an absent run.
         public static func failed(
             in document: AnalysisDocument, modelBlockID: UUID, description: String,
-            startedAt: Date, completedAt: Date = Date()
+            startedAt: Date, completedAt: Date = Date(),
+            executionEnvironment: ExecutionEnvironment? = ExecutionEnvironment.current
         ) throws -> AnalysisRun {
             try make(
                 in: document, modelBlockID: modelBlockID, startedAt: startedAt,
                 completedAt: completedAt, status: .failed,
                 retainedObservationCount: nil, failureDescription: description,
-                scaleSelection: nil
+                scaleSelection: nil, executionEnvironment: executionEnvironment
             )
         }
 
@@ -766,7 +893,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             in document: AnalysisDocument, modelBlockID: UUID,
             startedAt: Date, completedAt: Date, status: AnalysisRunStatus,
             retainedObservationCount: Int?, failureDescription: String?,
-            scaleSelection: StatisticalScaleSelection?
+            scaleSelection: StatisticalScaleSelection?, executionEnvironment: ExecutionEnvironment?
         ) throws -> AnalysisRun {
             guard let recipe = document.runRecipe(for: modelBlockID) else {
                 throw AnalysisDocumentError.invalidDependency(modelBlockID)
@@ -776,7 +903,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 transformationBlockIDs: document.transformationAncestors(of: modelBlockID),
                 recipe: recipe, startedAt: startedAt, completedAt: completedAt,
                 status: status, retainedObservationCount: retainedObservationCount,
-                failureDescription: failureDescription, scaleSelection: scaleSelection
+                failureDescription: failureDescription, scaleSelection: scaleSelection,
+                executionEnvironment: executionEnvironment
             )
         }
     }
@@ -1304,6 +1432,52 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         return blocks.filter { !assigned.contains($0.id) }
     }
 
+    /// Every immutable execution record in notebook order, including failed
+    /// terminal runs that may be relevant to a reproducibility review.
+    public var runBlocks: [Block] {
+        blocks.filter { if case .run = $0.payload { return true }; return false }
+    }
+
+    /// Compare two frozen runs without changing the document. This is an
+    /// explicit diff, not an assertion that changed environments are compatible.
+    public func difference(
+        baselineRunBlockID: UUID, candidateRunBlockID: UUID
+    ) throws -> AnalysisRunDifference {
+        guard baselineRunBlockID != candidateRunBlockID,
+              let baselineBlock = blocks.first(where: { $0.id == baselineRunBlockID }),
+              let candidateBlock = blocks.first(where: { $0.id == candidateRunBlockID }),
+              case .run(let baseline) = baselineBlock.payload,
+              case .run(let candidate) = candidateBlock.payload else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let baselineValidation = baseline.recipe.validationConfiguration
+        let candidateValidation = candidate.recipe.validationConfiguration
+        let environmentStatus: AnalysisRunDifference.EnvironmentStatus
+        switch (baseline.executionEnvironment, candidate.executionEnvironment) {
+        case let (baseline?, candidate?):
+            environmentStatus = baseline == candidate ? .exact : .changed
+        case (.none, _), (_, .none):
+            environmentStatus = .unavailableInLegacyRun
+        }
+        return AnalysisRunDifference(
+            baselineRunBlockID: baselineRunBlockID, candidateRunBlockID: candidateRunBlockID,
+            sourceFingerprintMatches: baseline.sourceFingerprint == candidate.sourceFingerprint,
+            transformationLineageMatches: baseline.transformationBlockIDs == candidate.transformationBlockIDs,
+            validationTaskMatches: baselineValidation.foldCount == candidateValidation.foldCount
+                && baselineValidation.partitioning == candidateValidation.partitioning
+                && baselineValidation.seed == candidateValidation.seed,
+            bootstrapSeedMatches: baseline.bootstrapSeed == candidate.bootstrapSeed,
+            scalePolicyMatches: baseline.recipe.scalePolicy == candidate.recipe.scalePolicy,
+            scaleSelectionMatches: baseline.scaleSelection == candidate.scaleSelection,
+            solverPreferenceMatches: baseline.requestedSolverPreference == candidate.requestedSolverPreference,
+            modelRecipeMatches: baseline.recipe == candidate.recipe,
+            environmentStatus: environmentStatus, baselineStatus: baseline.status,
+            candidateStatus: candidate.status,
+            baselineRetainedObservationCount: baseline.retainedObservationCount,
+            candidateRetainedObservationCount: candidate.retainedObservationCount
+        )
+    }
+
     /// Completed advanced runs that carry frozen held-out validation evidence.
     /// These are the only runs eligible for a paired comparison block.
     public var comparisonCandidateRunBlocks: [Block] {
@@ -1622,9 +1796,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // predates composition sections; version 7 predates explicit scaled
         // fit policy and observed scale selection; version 8 predates portable
         // review findings and explicit readiness; version 9 predates frozen
-        // comparative evidence. Existing representation is unchanged, so
-        // normalize on open and write the upgraded schema only when the host
-        // later saves.
+        // comparative evidence; version 10 predates execution-environment
+        // snapshots. Existing representation is unchanged, so normalize on
+        // open and write the upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }

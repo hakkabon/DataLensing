@@ -209,6 +209,8 @@ struct ContentView: View {
     @State private var reviewResolution = ""
     @State private var selectedComparisonBaselineRunID: UUID?
     @State private var selectedComparisonCandidateRunID: UUID?
+    @State private var selectedRunDiffBaselineID: UUID?
+    @State private var selectedRunDiffCandidateID: UUID?
     @State private var advancedTask: Task<Void, Never>?
     @State private var advancedLoading = false
 
@@ -514,6 +516,8 @@ struct ContentView: View {
                     }
 
                     numericalExecutionPanel(for: document)
+
+                    reproducibilityPanel(for: document)
 
                     comparativeEvidencePanel(for: document)
 
@@ -1342,6 +1346,111 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func reproducibilityPanel(for document: AnalysisDocument) -> some View {
+        let runs = document.runBlocks
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Reproducibility", systemImage: "seal.text.page")
+                .font(.caption.weight(.semibold))
+            Text("Each new run records its resolved statistical/numerical stack and runtime target. Legacy runs remain readable but do not claim an environment match.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if let latest = runs.last, case .run(let run) = latest.payload {
+                executionEnvironmentSummary(run.executionEnvironment)
+            } else {
+                Text("Record an explicit run to capture execution provenance.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if runs.count >= 2 {
+                Picker("Baseline run", selection: $selectedRunDiffBaselineID) {
+                    Text("Choose baseline").tag(UUID?.none)
+                    ForEach(runs) { runBlock in
+                        Text(runDiffTitle(runBlock, in: document)).tag(Optional(runBlock.id))
+                    }
+                }
+                .font(.caption)
+                Picker("Candidate run", selection: $selectedRunDiffCandidateID) {
+                    Text("Choose candidate").tag(UUID?.none)
+                    ForEach(runs) { runBlock in
+                        Text(runDiffTitle(runBlock, in: document)).tag(Optional(runBlock.id))
+                    }
+                }
+                .font(.caption)
+                if let baseline = selectedRunDiffBaselineID,
+                   let candidate = selectedRunDiffCandidateID,
+                   baseline != candidate,
+                   let difference = try? document.difference(
+                    baselineRunBlockID: baseline, candidateRunBlockID: candidate
+                   ) {
+                    runDifferenceSummary(difference)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func executionEnvironmentSummary(_ environment: AnalysisDocument.ExecutionEnvironment?) -> some View {
+        if let environment {
+            Text(
+                "DataLens \(environment.swiftDataLensVersion) · NumericCore \(environment.swiftNumericCoreVersion) · Rust \(environment.rustNumericCoreVersion)"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            Text("\(environment.platform) / \(environment.architecture) · build \(environment.hostBuildIdentifier)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } else {
+            Text("Legacy run: execution environment was not recorded.")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func runDiffTitle(_ runBlock: AnalysisDocument.Block, in document: AnalysisDocument) -> String {
+        guard case .run(let run) = runBlock.payload else { return runBlock.title }
+        let modelTitle = document.blocks.first(where: { $0.id == run.modelBlockID })?.title ?? "model"
+        return "\(modelTitle) · \(run.status.rawValue) · seed \(run.validationSeed)"
+    }
+
+    @ViewBuilder
+    private func runDifferenceSummary(_ difference: AnalysisDocument.AnalysisRunDifference) -> some View {
+        let inputStatus = difference.replayInputsMatch ? "same replay inputs" : "replay inputs changed"
+        let environmentStatus = runDifferenceEnvironmentStatusText(difference.environmentStatus)
+        let retained = [difference.baselineRetainedObservationCount, difference.candidateRetainedObservationCount]
+            .map { $0.map(String.init) ?? "not retained" }.joined(separator: " → ")
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(inputStatus) · \(environmentStatus)")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(
+                    difference.replayInputsMatch && difference.environmentStatus == .exact
+                        ? Color.green : Color.orange
+                )
+            Text(
+                "model \(difference.modelRecipeMatches ? "same" : "changed") · solver \(difference.solverPreferenceMatches ? "same" : "changed") · bootstrap \(difference.bootstrapSeedMatches ? "same" : "changed")"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            Text("outcome \(difference.baselineStatus.rawValue) → \(difference.candidateStatus.rawValue) · rows \(retained)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func runDifferenceEnvironmentStatusText(
+        _ status: AnalysisDocument.AnalysisRunDifference.EnvironmentStatus
+    ) -> String {
+        switch status {
+        case .exact:
+            return "same environment"
+        case .changed:
+            return "environment changed"
+        case .unavailableInLegacyRun:
+            return "legacy environment unavailable"
+        }
+    }
+
+    @ViewBuilder
     private func comparativeEvidencePanel(for document: AnalysisDocument) -> some View {
         let candidates = document.comparisonCandidateRunBlocks
         let comparisons = document.blocks.compactMap { block -> AnalysisDocument.ComparativeEvidence? in
@@ -1533,8 +1642,11 @@ struct ContentView: View {
             let scale = run.scaleSelection.map {
                 "\($0.selectedObservationCount)/\($0.eligibleObservationCount) selected"
             }
+            let environment = run.executionEnvironment.map {
+                "DataLens \($0.swiftDataLensVersion) · NumericCore \($0.swiftNumericCoreVersion) · Rust \($0.rustNumericCoreVersion)"
+            } ?? "legacy environment"
             let failure = run.failureDescription
-            return [run.status.rawValue, retained, lineage, scale, validationSeed, bootstrapSeed, solver, failure]
+            return [run.status.rawValue, retained, lineage, scale, validationSeed, bootstrapSeed, solver, environment, failure]
                 .compactMap { $0 }.joined(separator: " · ")
         case .evidence(let evidence):
             return "\(evidence.workbenchOutputs.count) validation panels · \(evidence.report.retainedObservationCount) rows"

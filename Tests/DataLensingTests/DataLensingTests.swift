@@ -1274,6 +1274,80 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     #expect(failed.failureDescription == "Source could not be replayed.")
 }
 
+@Test func executionEnvironmentsAndRunDifferencesCloseReproducibilityGaps() throws {
+    let url = try scratchCSV("x,y\n0,1\n1,3\n2,5\n")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let source = try AnalysisDocument.Source.make(from: url, table: CSVTable.load(contentsOf: url))
+    let validation = ValidationConfiguration(foldCount: 3, partitioning: .blocked, seed: 7)
+    let fullRecipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: validation
+    )
+    let boundedPolicy = StatisticalScalePolicy.stratifiedLeadingPredictor(maximumObservations: 2, seed: 4)
+    let boundedRecipe = try AnalysisDocument.ModelRecipe(
+        predictor: "x", response: "y", smoother: .loess, tuning: WorkbenchTuning(.interactive),
+        validationConfiguration: validation, scalePolicy: boundedPolicy
+    )
+    let fullModel = try AnalysisDocument.Block(title: "Full fit", payload: .model(fullRecipe))
+    let boundedModel = try AnalysisDocument.Block(title: "Bounded fit", payload: .model(boundedRecipe))
+    var document = try AnalysisDocument(title: "Environment diff", source: source, blocks: [fullModel, boundedModel])
+    let firstEnvironment = AnalysisDocument.ExecutionEnvironment(
+        hostBuildIdentifier: "0.38.0", swiftLanguageVersion: "6.1", platform: "macOS",
+        architecture: "arm64", swiftDataLensVersion: "0.20.1",
+        swiftNumericCoreVersion: "0.7.0", rustNumericCoreVersion: "0.5.0",
+        resolverFingerprint: "resolved-a"
+    )
+    let secondEnvironment = AnalysisDocument.ExecutionEnvironment(
+        hostBuildIdentifier: "0.38.1", swiftLanguageVersion: "6.1", platform: "macOS",
+        architecture: "arm64", swiftDataLensVersion: "0.20.1",
+        swiftNumericCoreVersion: "0.7.0", rustNumericCoreVersion: "0.5.0",
+        resolverFingerprint: "resolved-a"
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_700_010_000)
+    let fullRun = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: fullModel.id, retainedObservationCount: 3,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1),
+        executionEnvironment: firstEnvironment
+    )
+    let boundedSelection = StatisticalScaleSelection(
+        policy: boundedPolicy, inputObservationCount: 3, eligibleObservationCount: 3,
+        selectedIndices: [0, 2]
+    )
+    let boundedRun = try AnalysisDocument.AnalysisRun.completed(
+        in: document, modelBlockID: boundedModel.id, retainedObservationCount: 2,
+        startedAt: startedAt, completedAt: startedAt.addingTimeInterval(1),
+        scaleSelection: boundedSelection, executionEnvironment: secondEnvironment
+    )
+    let fullRunBlock = try AnalysisDocument.Block(
+        title: "Full run", upstreamBlockIDs: [fullModel.id], payload: .run(fullRun)
+    )
+    let boundedRunBlock = try AnalysisDocument.Block(
+        title: "Bounded run", upstreamBlockIDs: [boundedModel.id], payload: .run(boundedRun)
+    )
+    try document.append(fullRunBlock)
+    try document.append(boundedRunBlock)
+    let difference = try document.difference(
+        baselineRunBlockID: fullRunBlock.id, candidateRunBlockID: boundedRunBlock.id
+    )
+    #expect(difference.sourceFingerprintMatches)
+    #expect(difference.transformationLineageMatches)
+    #expect(difference.validationTaskMatches)
+    #expect(!difference.scalePolicyMatches)
+    #expect(!difference.scaleSelectionMatches)
+    #expect(!difference.replayInputsMatch)
+    #expect(difference.environmentStatus == .changed)
+    #expect(fullRun.executionEnvironment == firstEnvironment)
+    #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
+
+    var legacyObject = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(fullRun)) as? [String: Any]
+    )
+    legacyObject.removeValue(forKey: "executionEnvironment")
+    let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+    let legacyRun = try JSONDecoder().decode(AnalysisDocument.AnalysisRun.self, from: legacyData)
+    #expect(legacyRun.executionEnvironment == nil)
+}
+
 @Test func advancedDocumentEvidenceRecordsGamValidationAndBootstrapStability() throws {
     let rows = (0..<36).map { index -> String in
         let x = Double(index) / 7

@@ -219,6 +219,17 @@ evidence depend on that run block, so a later recomputation cannot overwrite or
 silently reassign prior evidence. Editing an upstream block marks historic runs
 stale while preserving their recorded inputs and outcome.
 
+Every newly recorded run also captures reproducibility closure: the host build
+identifier, Swift language version, platform/architecture, resolved
+Swift-DataLens / Swift-NumericCore / Rust-NumericCore versions, and the checked-
+in resolver fingerprint. These fields describe the execution stack; they do not
+claim bitwise equivalence across a changed stack. The workbench can diff any two
+saved runs without mutating the document, separating changed replay inputs
+(source, transformations, folds, scale policy/selection) from changed model,
+solver, bootstrap, environment, and terminal-outcome fields. Older documents
+remain readable with an explicit “environment unavailable” result rather than a
+fabricated match.
+
 Validation plans are now first-class notebook blocks. A plan records fold
 construction (shuffled, blocked ordered/spatial, or binary-stratified), its
 deterministic seed, optional bootstrap policy, and an optional comparison cohort.
