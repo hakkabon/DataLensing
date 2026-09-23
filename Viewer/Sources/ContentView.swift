@@ -184,6 +184,11 @@ struct ContentView: View {
     @State private var showingDocumentSourceImporter = false
     @State private var showingDocumentExporter = false
     @State private var documentExport: AnalysisDocumentFile?
+    @State private var showingPublicationExporter = false
+    @State private var publicationExport: AnalysisDocumentFile?
+    @State private var publicationSnapshot: AnalysisPublication?
+    @State private var publicationTitle = ""
+    @State private var publicationAbstract = ""
     @State private var figureCaption = ""
     @State private var advancedStrategy: AdvancedStrategyChoice = .gaussianGAM
     @State private var advancedSolver: MultivariateSolverPreference = .automatic
@@ -282,6 +287,12 @@ struct ContentView: View {
             contentType: .json, defaultFilename: documentDefaultFileName
         ) { result in
             if case .success(let url) = result { documentURL = url }
+            if case .failure(let error) = result { documentError = String(describing: error) }
+        }
+        .fileExporter(
+            isPresented: $showingPublicationExporter, document: publicationExport,
+            contentType: .json, defaultFilename: publicationDefaultFileName
+        ) { result in
             if case .failure(let error) = result { documentError = String(describing: error) }
         }
         // ─── Keyboard Shortcuts ───────────────────────────────────────
@@ -475,6 +486,9 @@ struct ContentView: View {
 
                     Divider()
                     reviewPanel(for: document)
+
+                    Divider()
+                    publicationPanel(for: document)
 
                     if case .ready(let built) = phase {
                         Button("Update Recipe from Visible Chart") {
@@ -1016,6 +1030,12 @@ struct ContentView: View {
         return safe.isEmpty ? "analysis" : safe
     }
 
+    private var publicationDefaultFileName: String {
+        let title = publicationSnapshot?.title ?? analysisDocument?.title ?? "analysis-publication"
+        let safe = title.replacingOccurrences(of: "/", with: "-")
+        return safe.isEmpty ? "analysis-publication" : "\(safe)-publication"
+    }
+
     @ViewBuilder
     private func documentStateBadge(for document: AnalysisDocument) -> some View {
         let stale = document.blocks.filter { $0.state == .stale }.count
@@ -1352,6 +1372,86 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    /// Publishing freezes a reader-facing package outside the mutable
+    /// notebook. The local snapshot survives later edits in this view, but
+    /// only its JSON/Markdown export is intended for sharing.
+    @ViewBuilder
+    private func publicationPanel(for document: AnalysisDocument) -> some View {
+        let accepted = document.reviewSummary.readiness == .accepted
+        VStack(alignment: .leading, spacing: 5) {
+            Label("Portable publication", systemImage: "shippingbox.fill")
+                .font(.caption.weight(.semibold))
+            Text("Freeze accepted conclusions, terminal experiment records, review outcomes, and numerical provenance. Source rows and executable code are excluded.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            TextField("Publication title (defaults to document title)", text: $publicationTitle)
+                .font(.caption)
+            TextField("Editorial context (optional)", text: $publicationAbstract)
+                .font(.caption)
+            Button("Freeze Publication Snapshot") {
+                createPublication(from: document)
+            }
+            .font(.caption)
+            .disabled(documentRecomputing || !accepted)
+
+            if !accepted {
+                Text("Accept a fully current document before publication can be frozen.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            if let publicationSnapshot {
+                Label(
+                    "Frozen \(publicationSnapshot.syntheses.count) syntheses · \(publicationSnapshot.experiments.count) terminal checkpoints",
+                    systemImage: "checkmark.seal.fill"
+                )
+                .font(.caption2)
+                .foregroundStyle(.green)
+                HStack(spacing: 6) {
+                    Button("Copy Markdown") { copyPublicationMarkdown(publicationSnapshot) }
+                    Button("Export JSON…") { exportPublication(publicationSnapshot) }
+                }
+                .font(.caption)
+                Text("Exports are local files or clipboard content; this does not send a publication to a service.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func createPublication(from document: AnalysisDocument) {
+        documentError = nil
+        do {
+            let title = publicationTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            publicationSnapshot = try AnalysisPublication.make(
+                from: document, title: title.isEmpty ? nil : title,
+                abstract: publicationAbstract
+            )
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func exportPublication(_ publication: AnalysisPublication) {
+        documentError = nil
+        do {
+            publicationExport = AnalysisDocumentFile(data: try publication.jsonData())
+            showingPublicationExporter = true
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func copyPublicationMarkdown(_ publication: AnalysisPublication) {
+        let markdown = publication.markdown()
+        #if canImport(AppKit)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(markdown, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = markdown
+        #endif
     }
 
     @ViewBuilder

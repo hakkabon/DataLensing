@@ -301,6 +301,24 @@ DataLensing, Swift-DataLens, and Swift-NumericCore together and rejects drift in
 their shared solver fixture. Tagged backend releases can dispatch the same
 check immediately; the weekly run is the no-secret fallback.
 
+## Portable review and publishing
+
+An accepted, fully current analysis document can now be frozen as an
+`AnalysisPublication`. This is a small, independent JSON package with a stable
+schema and a generated Markdown reader summary. It copies the privacy-preserving
+source identity, closed review outcomes, current evidence syntheses, completed
+or stopped experiment checkpoints, and distinct numerical environments captured
+by current runs. It does not copy source rows, absolute paths, credentials,
+rendered pixels, or arbitrary executable code.
+
+Publication is intentionally a local closure step rather than a network action:
+the viewer can freeze a snapshot, copy its Markdown, or export its JSON. A
+publication requires the document's explicit accepted review state and at least
+one current analyst synthesis or terminal experiment checkpoint. Later edits to
+the notebook can make its blocks stale, but cannot alter an already frozen
+package. This keeps portable review artifacts honest about what was assessed at
+publication time while leaving the live notebook free to continue.
+
 ## Statistical workflow
 
 The frontend now turns a fitted chart into a family-aware `ModelAssessment`.

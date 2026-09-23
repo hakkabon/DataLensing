@@ -1558,12 +1558,29 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         at: startedAt.addingTimeInterval(7)
     )
 
+    #expect(throws: AnalysisPublication.Error.documentIsNotAccepted) {
+        _ = try AnalysisPublication.make(from: document)
+    }
+    try document.setReviewReadiness(.accepted, at: startedAt.addingTimeInterval(8))
+    let publication = try AnalysisPublication.make(
+        from: document, title: "Published GAM comparison",
+        abstract: "A portable, review-ready summary.",
+        publishedAt: startedAt.addingTimeInterval(9)
+    )
+    #expect(publication.sourceDocumentID == document.id)
+    #expect(publication.syntheses.map(\.id) == [synthesisID])
+    #expect(publication.experiments.map(\.id) == [checkpointID, stoppedCheckpointID])
+    #expect(publication.numericalEnvironments.count == 1)
+    #expect(publication.markdown().contains("narrower candidate"))
+    #expect(try AnalysisPublication(jsonData: publication.jsonData()) == publication)
+
     _ = try document.update(blockID: baselineModel.id, payload: .advancedModel(baselineRecipe))
     #expect(document.blocks.first(where: { $0.id == comparisonID })?.state == .stale)
     #expect(document.blocks.first(where: { $0.id == synthesisID })?.state == .stale)
     #expect(document.blocks.first(where: { $0.id == protocolID })?.state == .stale)
     #expect(document.blocks.first(where: { $0.id == checkpointID })?.state == .stale)
     #expect(document.blocks.first(where: { $0.id == stoppedCheckpointID })?.state == .stale)
+    #expect(publication.syntheses.map(\.id) == [synthesisID])
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 
