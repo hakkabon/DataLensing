@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 12
+    public static let currentSchemaVersion = 13
 
     public let id: UUID
     public let schemaVersion: Int
@@ -665,6 +665,134 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// A planned numerical-statistics experiment over named model arms.
+    ///
+    /// The protocol is intentionally declarative: it records what is being
+    /// tested, the primary endpoint, and the decision rule before a checkpoint
+    /// attaches completed executions. It cannot execute code or alter a model.
+    public struct ExperimentProtocol: Codable, Sendable, Hashable {
+        public struct Arm: Codable, Sendable, Hashable {
+            public let label: String
+            public let modelBlockID: UUID
+
+            public init(label: String, modelBlockID: UUID) throws {
+                let normalizedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedLabel.isEmpty else {
+                    throw AnalysisDocumentError.invalidConfiguration
+                }
+                self.label = normalizedLabel
+                self.modelBlockID = modelBlockID
+            }
+
+            fileprivate var isValid: Bool {
+                !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+
+        public let plannedAt: Date
+        public let question: String
+        public let hypothesis: String
+        /// The pre-specified quantity the experiment is intended to judge.
+        public let primaryEndpoint: String
+        /// The human-readable rule that will inform the next decision.
+        public let decisionRule: String
+        public let arms: [Arm]
+
+        public init(
+            plannedAt: Date = Date(), question: String, hypothesis: String,
+            primaryEndpoint: String, decisionRule: String, arms: [Arm]
+        ) throws {
+            let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hypothesis = hypothesis.trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint = primaryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rule = decisionRule.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !question.isEmpty, !hypothesis.isEmpty, !endpoint.isEmpty, !rule.isEmpty,
+                  arms.count >= 2, arms.allSatisfy(\.isValid),
+                  Set(arms.map(\.modelBlockID)).count == arms.count,
+                  Set(arms.map(\.label)).count == arms.count else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.plannedAt = plannedAt
+            self.question = question
+            self.hypothesis = hypothesis
+            self.primaryEndpoint = endpoint
+            self.decisionRule = rule
+            self.arms = arms
+        }
+
+        fileprivate var isValid: Bool {
+            (try? Self(
+                plannedAt: plannedAt, question: question, hypothesis: hypothesis,
+                primaryEndpoint: primaryEndpoint, decisionRule: decisionRule, arms: arms
+            )) != nil
+        }
+    }
+
+    /// An immutable progress or closure record for an experiment protocol.
+    public struct ExperimentCheckpoint: Codable, Sendable, Hashable {
+        public enum Status: String, Codable, Sendable, Hashable, CaseIterable {
+            case inProgress
+            case completed
+            case stopped
+        }
+
+        /// Connects one planned model arm to the exact completed run used at
+        /// this checkpoint. The model ID is retained as an explicit audit key.
+        public struct ArmRun: Codable, Sendable, Hashable {
+            public let modelBlockID: UUID
+            public let runBlockID: UUID
+
+            public init(modelBlockID: UUID, runBlockID: UUID) {
+                self.modelBlockID = modelBlockID
+                self.runBlockID = runBlockID
+            }
+        }
+
+        public let capturedAt: Date
+        public let protocolBlockID: UUID
+        public let status: Status
+        public let armRuns: [ArmRun]
+        /// Optional analyst conclusion relevant to this checkpoint.
+        public let synthesisBlockID: UUID?
+        /// Required when the protocol was stopped rather than completed.
+        public let deviationNote: String?
+        /// The explicitly recorded follow-up rather than an implied action.
+        public let nextStep: String
+
+        public init(
+            capturedAt: Date = Date(), protocolBlockID: UUID, status: Status,
+            armRuns: [ArmRun], synthesisBlockID: UUID? = nil,
+            deviationNote: String? = nil, nextStep: String
+        ) throws {
+            let normalizedDeviation = deviationNote?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedNextStep = nextStep.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !armRuns.isEmpty,
+                  Set(armRuns.map(\.modelBlockID)).count == armRuns.count,
+                  Set(armRuns.map(\.runBlockID)).count == armRuns.count,
+                  !normalizedNextStep.isEmpty,
+                  normalizedDeviation?.isEmpty != true,
+                  (status != .stopped || normalizedDeviation != nil) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.capturedAt = capturedAt
+            self.protocolBlockID = protocolBlockID
+            self.status = status
+            self.armRuns = armRuns
+            self.synthesisBlockID = synthesisBlockID
+            self.deviationNote = normalizedDeviation
+            self.nextStep = normalizedNextStep
+        }
+
+        fileprivate var isValid: Bool {
+            (try? Self(
+                capturedAt: capturedAt, protocolBlockID: protocolBlockID, status: status,
+                armRuns: armRuns, synthesisBlockID: synthesisBlockID,
+                deviationNote: deviationNote, nextStep: nextStep
+            )) != nil
+        }
+    }
+
     /// Numerical and package-resolution context captured with an explicit run.
     ///
     /// The record identifies the shipped numerical stack and runtime target;
@@ -1004,6 +1132,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         case advancedEvidence(AdvancedModelEvidence)
         case comparison(ComparativeEvidence)
         case synthesis(EvidenceSynthesis)
+        case experimentProtocol(ExperimentProtocol)
+        case experimentCheckpoint(ExperimentCheckpoint)
         case figure(FigureAnnotation)
         case note(String)
     }
@@ -1066,6 +1196,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             case .advancedEvidence(let evidence): return evidence.isValid
             case .comparison(let comparison): return comparison.isValid
             case .synthesis(let synthesis): return synthesis.isValid
+            case .experimentProtocol(let protocolValue): return protocolValue.isValid
+            case .experimentCheckpoint(let checkpoint): return checkpoint.isValid
             case .figure(let figure): return figure.isValid
             case .note(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -1176,7 +1308,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                     preparation.append(block.id)
                 case .validationPlan, .model, .advancedModel:
                     methods.append(block.id)
-                case .run, .evidence, .advancedEvidence, .comparison, .synthesis, .figure, .note:
+                case .run, .evidence, .advancedEvidence, .comparison, .synthesis,
+                     .experimentProtocol, .experimentCheckpoint, .figure, .note:
                     evidence.append(block.id)
                 }
             }
@@ -1568,6 +1701,49 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         blocks.filter { if case .synthesis = $0.payload { return true }; return false }
     }
 
+    /// Current model recipes available as named arms of a new experiment.
+    public var experimentCandidateModelBlocks: [Block] {
+        blocks.filter { block in
+            guard block.state == .current else { return false }
+            switch block.payload {
+            case .model, .advancedModel:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Saved experiment protocols, including stale historical protocols.
+    public var experimentProtocolBlocks: [Block] {
+        blocks.filter { if case .experimentProtocol = $0.payload { return true }; return false }
+    }
+
+    /// Completed current runs that belong to the selected protocol's planned
+    /// arms. A checkpoint may select a subset while an experiment is active.
+    public func experimentCandidateRunBlocks(for protocolBlockID: UUID) -> [Block] {
+        guard let protocolBlock = blocks.first(where: { $0.id == protocolBlockID }),
+              protocolBlock.state == .current,
+              case .experimentProtocol(let protocolValue) = protocolBlock.payload else {
+            return []
+        }
+        let armModelIDs = Set(protocolValue.arms.map(\.modelBlockID))
+        return blocks.filter { block in
+            guard block.state == .current, case .run(let run) = block.payload else { return false }
+            return run.status == .completed && armModelIDs.contains(run.modelBlockID)
+        }
+    }
+
+    /// Current syntheses available to attach as an interpretation to a new
+    /// experiment checkpoint.
+    public var experimentCandidateSynthesisBlocks: [Block] {
+        blocks.filter { block in
+            guard block.state == .current else { return false }
+            if case .synthesis = block.payload { return true }
+            return false
+        }
+    }
+
     /// Add one immutable comparison block. The block retains both runs and
     /// evidence blocks as direct inputs, so later upstream edits make the
     /// comparison visibly stale rather than silently reusing it.
@@ -1640,6 +1816,105 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         let block = try Block(
             title: title, upstreamBlockIDs: evidenceBlockIDs, payload: .synthesis(synthesis),
             createdAt: date, updatedAt: date
+        )
+        try append(block, at: date)
+        return block.id
+    }
+
+    /// Create a protocol after selecting at least two current model recipes as
+    /// experimental arms. The arm labels are captured now so later edits to a
+    /// block title cannot rewrite historical planning prose.
+    @discardableResult
+    public mutating func recordExperimentProtocol(
+        title: String, question: String, hypothesis: String, primaryEndpoint: String,
+        decisionRule: String, modelBlockIDs: [UUID], at date: Date = Date()
+    ) throws -> UUID {
+        guard modelBlockIDs.count >= 2, Set(modelBlockIDs).count == modelBlockIDs.count else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let armBlocks = modelBlockIDs.compactMap { id in blocks.first(where: { $0.id == id }) }
+        guard armBlocks.count == modelBlockIDs.count,
+              armBlocks.allSatisfy({ $0.state == .current }) else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        var usedLabels = Set<String>()
+        let arms = try armBlocks.map { block -> ExperimentProtocol.Arm in
+            switch block.payload {
+            case .model, .advancedModel:
+                let baseLabel = block.title
+                var label = baseLabel
+                var suffix = 2
+                while usedLabels.contains(label) {
+                    label = "\(baseLabel) (\(suffix))"
+                    suffix += 1
+                }
+                usedLabels.insert(label)
+                return try ExperimentProtocol.Arm(label: label, modelBlockID: block.id)
+            default:
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+        }
+        let protocolValue = try ExperimentProtocol(
+            plannedAt: date, question: question, hypothesis: hypothesis,
+            primaryEndpoint: primaryEndpoint, decisionRule: decisionRule, arms: arms
+        )
+        let block = try Block(
+            title: title, upstreamBlockIDs: modelBlockIDs,
+            payload: .experimentProtocol(protocolValue), createdAt: date, updatedAt: date
+        )
+        try append(block, at: date)
+        return block.id
+    }
+
+    /// Record a durable experiment checkpoint. It binds selected completed runs
+    /// to their planned arms without refitting and may link a saved evidence
+    /// synthesis. A `completed` checkpoint must cover every arm; a `stopped`
+    /// checkpoint must explain the deviation.
+    @discardableResult
+    public mutating func recordExperimentCheckpoint(
+        protocolBlockID: UUID, runBlockIDs: [UUID], status: ExperimentCheckpoint.Status,
+        synthesisBlockID: UUID? = nil, deviationNote: String? = nil, nextStep: String,
+        at date: Date = Date()
+    ) throws -> UUID {
+        guard Set(runBlockIDs).count == runBlockIDs.count,
+              let protocolBlock = blocks.first(where: { $0.id == protocolBlockID }),
+              protocolBlock.state == .current,
+              case .experimentProtocol(let protocolValue) = protocolBlock.payload else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let runBlocks = runBlockIDs.compactMap { id in blocks.first(where: { $0.id == id }) }
+        guard runBlocks.count == runBlockIDs.count else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let armRuns = try runBlocks.map { block -> ExperimentCheckpoint.ArmRun in
+            guard block.state == .current, case .run(let run) = block.payload,
+                  run.status == .completed,
+                  protocolValue.arms.contains(where: { $0.modelBlockID == run.modelBlockID }) else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            return ExperimentCheckpoint.ArmRun(modelBlockID: run.modelBlockID, runBlockID: block.id)
+        }
+        let plannedModelIDs = Set(protocolValue.arms.map(\.modelBlockID))
+        let observedModelIDs = Set(armRuns.map(\.modelBlockID))
+        guard status != .completed || observedModelIDs == plannedModelIDs else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        if let synthesisBlockID {
+            guard let synthesisBlock = blocks.first(where: { $0.id == synthesisBlockID }),
+                  synthesisBlock.state == .current,
+                  case .synthesis = synthesisBlock.payload else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+        }
+        let checkpoint = try ExperimentCheckpoint(
+            capturedAt: date, protocolBlockID: protocolBlockID, status: status,
+            armRuns: armRuns, synthesisBlockID: synthesisBlockID,
+            deviationNote: deviationNote, nextStep: nextStep
+        )
+        let block = try Block(
+            title: "Experiment \(status.rawValue)",
+            upstreamBlockIDs: [protocolBlockID] + runBlockIDs + (synthesisBlockID.map { [$0] } ?? []),
+            payload: .experimentCheckpoint(checkpoint), createdAt: date, updatedAt: date
         )
         try append(block, at: date)
         return block.id
@@ -1911,7 +2186,8 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // fit policy and observed scale selection; version 8 predates portable
         // review findings and explicit readiness; version 9 predates frozen
         // comparative evidence; version 10 predates execution-environment
-        // snapshots; version 11 predates evidence-synthesis blocks. Existing
+        // snapshots; version 11 predates evidence-synthesis blocks; version 12
+        // predates experiment protocol and checkpoint blocks. Existing
         // representation is unchanged, so normalize on open and write the
         // upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
@@ -1983,6 +2259,14 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             }
             if case .synthesis(let synthesis) = block.payload,
                !isValidSynthesisDependency(block, synthesis: synthesis) {
+                throw AnalysisDocumentError.invalidEvidence(block.id)
+            }
+            if case .experimentProtocol(let protocolValue) = block.payload,
+               !isValidExperimentProtocolDependency(block, protocolValue: protocolValue) {
+                throw AnalysisDocumentError.invalidDependency(block.id)
+            }
+            if case .experimentCheckpoint(let checkpoint) = block.payload,
+               !isValidExperimentCheckpointDependency(block, checkpoint: checkpoint) {
                 throw AnalysisDocumentError.invalidEvidence(block.id)
             }
             if case .model(let recipe) = block.payload,
@@ -2111,6 +2395,55 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 return false
             }
         }
+        return true
+    }
+
+    private func isValidExperimentProtocolDependency(
+        _ block: Block, protocolValue: ExperimentProtocol
+    ) -> Bool {
+        let modelBlockIDs = protocolValue.arms.map(\.modelBlockID)
+        guard block.upstreamBlockIDs == modelBlockIDs else { return false }
+        for modelBlockID in modelBlockIDs {
+            guard let modelBlock = blocks.first(where: { $0.id == modelBlockID }) else { return false }
+            switch modelBlock.payload {
+            case .model, .advancedModel:
+                if block.state == .current && modelBlock.state != .current { return false }
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    private func isValidExperimentCheckpointDependency(
+        _ block: Block, checkpoint: ExperimentCheckpoint
+    ) -> Bool {
+        guard let protocolBlock = blocks.first(where: { $0.id == checkpoint.protocolBlockID }),
+              case .experimentProtocol(let protocolValue) = protocolBlock.payload else {
+            return false
+        }
+        let expectedInputs = [checkpoint.protocolBlockID]
+            + checkpoint.armRuns.map(\.runBlockID)
+            + (checkpoint.synthesisBlockID.map { [$0] } ?? [])
+        guard block.upstreamBlockIDs == expectedInputs else { return false }
+        let plannedModelIDs = Set(protocolValue.arms.map(\.modelBlockID))
+        let observedModelIDs = Set(checkpoint.armRuns.map(\.modelBlockID))
+        guard observedModelIDs.isSubset(of: plannedModelIDs) else { return false }
+        if checkpoint.status == .completed && observedModelIDs != plannedModelIDs { return false }
+        for armRun in checkpoint.armRuns {
+            guard let runBlock = blocks.first(where: { $0.id == armRun.runBlockID }),
+                  case .run(let run) = runBlock.payload,
+                  run.status == .completed, run.modelBlockID == armRun.modelBlockID else {
+                return false
+            }
+            if block.state == .current && runBlock.state != .current { return false }
+        }
+        if let synthesisBlockID = checkpoint.synthesisBlockID {
+            guard let synthesisBlock = blocks.first(where: { $0.id == synthesisBlockID }),
+                  case .synthesis = synthesisBlock.payload else { return false }
+            if block.state == .current && synthesisBlock.state != .current { return false }
+        }
+        if block.state == .current && protocolBlock.state != .current { return false }
         return true
     }
 

@@ -1523,9 +1523,47 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
         )
     }
 
+    let protocolID = try document.recordExperimentProtocol(
+        title: "Span comparison protocol",
+        question: "Does the narrower span improve held-out predictive loss?",
+        hypothesis: "The narrower span reduces held-out loss on the blocked folds.",
+        primaryEndpoint: "Paired held-out loss",
+        decisionRule: "Prefer a comparable candidate only when the paired loss supports it.",
+        modelBlockIDs: [baselineModel.id, candidateModel.id], at: startedAt.addingTimeInterval(5)
+    )
+    #expect(document.experimentCandidateRunBlocks(for: protocolID).map(\.id) == [
+        baselineRunBlock.id, candidateRunBlock.id,
+    ])
+    let checkpointID = try document.recordExperimentCheckpoint(
+        protocolBlockID: protocolID, runBlockIDs: [baselineRunBlock.id, candidateRunBlock.id],
+        status: .completed, synthesisBlockID: synthesisID,
+        nextStep: "Review the candidate choice before changing the model family.",
+        at: startedAt.addingTimeInterval(6)
+    )
+    let checkpointBlock = try #require(document.blocks.first(where: { $0.id == checkpointID }))
+    let checkpoint = try #require({ if case .experimentCheckpoint(let value) = checkpointBlock.payload { return value }; return nil }())
+    #expect(checkpoint.status == .completed)
+    #expect(checkpoint.armRuns.count == 2)
+    #expect(checkpoint.synthesisBlockID == synthesisID)
+    #expect(throws: AnalysisDocumentError.invalidConfiguration) {
+        _ = try document.recordExperimentCheckpoint(
+            protocolBlockID: protocolID, runBlockIDs: [baselineRunBlock.id], status: .completed,
+            nextStep: "This cannot close a two-arm protocol."
+        )
+    }
+    let stoppedCheckpointID = try document.recordExperimentCheckpoint(
+        protocolBlockID: protocolID, runBlockIDs: [baselineRunBlock.id], status: .stopped,
+        deviationNote: "The second arm is intentionally deferred.",
+        nextStep: "Revisit the protocol after collecting the deferred run.",
+        at: startedAt.addingTimeInterval(7)
+    )
+
     _ = try document.update(blockID: baselineModel.id, payload: .advancedModel(baselineRecipe))
     #expect(document.blocks.first(where: { $0.id == comparisonID })?.state == .stale)
     #expect(document.blocks.first(where: { $0.id == synthesisID })?.state == .stale)
+    #expect(document.blocks.first(where: { $0.id == protocolID })?.state == .stale)
+    #expect(document.blocks.first(where: { $0.id == checkpointID })?.state == .stale)
+    #expect(document.blocks.first(where: { $0.id == stoppedCheckpointID })?.state == .stale)
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 

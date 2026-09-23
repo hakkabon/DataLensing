@@ -239,6 +239,16 @@ claim: it is accountable prose with direct dependencies. If any cited evidence
 becomes stale, the synthesis becomes stale too; the historical conclusion and
 its original references remain readable for review.
 
+Experiment workflows add a pre-specified protocol layer above individual runs.
+An experiment protocol names at least two current model arms, records the
+question, hypothesis, primary endpoint, and decision rule, then freezes those
+choices as dependencies on the exact model recipes. Later checkpoints attach
+only completed runs for those arms, may link a saved evidence synthesis, and
+state an explicit next step. A completed checkpoint must cover every planned
+arm; a stopped checkpoint requires a saved deviation reason. Model, run, or
+synthesis changes make dependent protocols and checkpoints stale, retaining
+the original plan and outcome for audit rather than silently revising history.
+
 Validation plans are now first-class notebook blocks. A plan records fold
 construction (shuffled, blocked ordered/spatial, or binary-stratified), its
 deterministic seed, optional bootstrap policy, and an optional comparison cohort.

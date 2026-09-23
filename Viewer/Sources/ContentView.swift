@@ -215,6 +215,18 @@ struct ContentView: View {
     @State private var evidenceSynthesisAssessment: AnalysisDocument.EvidenceSynthesis.Assessment = .inconclusive
     @State private var evidenceSynthesisCaveats = ""
     @State private var selectedSynthesisEvidenceBlockIDs = Set<UUID>()
+    @State private var experimentTitle = "Experiment protocol"
+    @State private var experimentQuestion = ""
+    @State private var experimentHypothesis = ""
+    @State private var experimentPrimaryEndpoint = "Held-out predictive loss"
+    @State private var experimentDecisionRule = "Use comparable held-out evidence to choose the next model iteration."
+    @State private var selectedExperimentModelBlockIDs = Set<UUID>()
+    @State private var selectedExperimentProtocolBlockID: UUID?
+    @State private var selectedExperimentRunBlockIDs = Set<UUID>()
+    @State private var selectedExperimentSynthesisBlockID: UUID?
+    @State private var experimentCheckpointStatus: AnalysisDocument.ExperimentCheckpoint.Status = .inProgress
+    @State private var experimentDeviationNote = ""
+    @State private var experimentNextStep = "Review the checkpoint and record the next planned iteration."
     @State private var selectedRunDiffBaselineID: UUID?
     @State private var selectedRunDiffCandidateID: UUID?
     @State private var advancedTask: Task<Void, Never>?
@@ -524,6 +536,8 @@ struct ContentView: View {
                     numericalExecutionPanel(for: document)
 
                     reproducibilityPanel(for: document)
+
+                    experimentWorkflowPanel(for: document)
 
                     comparativeEvidencePanel(for: document)
 
@@ -1221,6 +1235,49 @@ struct ContentView: View {
         }
     }
 
+    private func recordExperimentProtocol() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        do {
+            let candidateIDs = document.experimentCandidateModelBlocks
+                .filter { selectedExperimentModelBlockIDs.contains($0.id) }
+                .map(\.id)
+            let protocolID = try document.recordExperimentProtocol(
+                title: experimentTitle, question: experimentQuestion,
+                hypothesis: experimentHypothesis, primaryEndpoint: experimentPrimaryEndpoint,
+                decisionRule: experimentDecisionRule, modelBlockIDs: candidateIDs
+            )
+            analysisDocument = document
+            selectedExperimentModelBlockIDs.removeAll()
+            selectedExperimentProtocolBlockID = protocolID
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
+    private func recordExperimentCheckpoint() {
+        guard var document = analysisDocument,
+              let protocolBlockID = selectedExperimentProtocolBlockID else { return }
+        documentError = nil
+        do {
+            let runIDs = document.experimentCandidateRunBlocks(for: protocolBlockID)
+                .filter { selectedExperimentRunBlockIDs.contains($0.id) }
+                .map(\.id)
+            _ = try document.recordExperimentCheckpoint(
+                protocolBlockID: protocolBlockID, runBlockIDs: runIDs,
+                status: experimentCheckpointStatus,
+                synthesisBlockID: selectedExperimentSynthesisBlockID,
+                deviationNote: experimentDeviationNote, nextStep: experimentNextStep
+            )
+            analysisDocument = document
+            selectedExperimentRunBlockIDs.removeAll()
+            selectedExperimentSynthesisBlockID = nil
+            experimentDeviationNote = ""
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
     @ViewBuilder
     private func reviewPanel(for document: AnalysisDocument) -> some View {
         let summary = document.reviewSummary
@@ -1477,6 +1534,199 @@ struct ContentView: View {
             return "environment changed"
         case .unavailableInLegacyRun:
             return "legacy environment unavailable"
+        }
+    }
+
+    @ViewBuilder
+    private func experimentWorkflowPanel(for document: AnalysisDocument) -> some View {
+        let modelCandidates = document.experimentCandidateModelBlocks
+        let protocols = document.experimentProtocolBlocks.filter { $0.state == .current }
+        let selectedProtocol = selectedExperimentProtocolBlockID.flatMap { id in
+            protocols.first(where: { $0.id == id })
+        }
+        let runCandidates = selectedExperimentProtocolBlockID.map {
+            document.experimentCandidateRunBlocks(for: $0)
+        } ?? []
+        let synthesisCandidates = document.experimentCandidateSynthesisBlocks
+        let selectedRunCount = runCandidates.filter {
+            selectedExperimentRunBlockIDs.contains($0.id)
+        }.count
+        let plannedArmCount: Int = {
+            guard let selectedProtocol,
+                  case .experimentProtocol(let protocolValue) = selectedProtocol.payload else { return 0 }
+            return protocolValue.arms.count
+        }()
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Experiment workflow", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.caption.weight(.semibold))
+            Text("Pre-specify arms, endpoint, and decision rule; then record completed-run checkpoints. This does not refit models or infer an outcome.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if modelCandidates.count < 2 {
+                Text("Record two current model recipes to plan an experiment.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                TextField("Protocol title", text: $experimentTitle)
+                    .font(.caption)
+                TextField("Question", text: $experimentQuestion)
+                    .font(.caption)
+                TextField("Hypothesis", text: $experimentHypothesis)
+                    .font(.caption)
+                TextField("Primary endpoint", text: $experimentPrimaryEndpoint)
+                    .font(.caption)
+                TextField("Decision rule", text: $experimentDecisionRule)
+                    .font(.caption)
+                Text("Select model arms")
+                    .font(.caption2.weight(.medium))
+                ForEach(modelCandidates) { block in
+                    Toggle(block.title, isOn: experimentModelSelectionBinding(for: block.id))
+                        .font(.caption2)
+                }
+                Button("Record Protocol") { recordExperimentProtocol() }
+                    .font(.caption)
+                    .disabled(
+                        documentRecomputing || selectedExperimentModelBlockIDs.count < 2
+                            || experimentTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || experimentQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || experimentHypothesis.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || experimentPrimaryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || experimentDecisionRule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+            }
+            if !protocols.isEmpty {
+                Picker("Checkpoint protocol", selection: $selectedExperimentProtocolBlockID) {
+                    Text("Choose protocol").tag(UUID?.none)
+                    ForEach(protocols) { block in
+                        Text(experimentProtocolTitle(block)).tag(Optional(block.id))
+                    }
+                }
+                .font(.caption)
+                if selectedProtocol != nil {
+                    Text("Run coverage: \(selectedRunCount)/\(plannedArmCount) planned arms")
+                        .font(.caption2)
+                        .foregroundStyle(
+                            experimentCheckpointStatus == .completed && selectedRunCount != plannedArmCount
+                                ? Color.orange : Color.secondary
+                        )
+                    if runCandidates.isEmpty {
+                        Text("No completed current runs match this protocol's arms yet.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(runCandidates) { block in
+                            Toggle(experimentRunTitle(block, in: document), isOn: experimentRunSelectionBinding(for: block.id))
+                                .font(.caption2)
+                        }
+                    }
+                    Picker("Checkpoint status", selection: $experimentCheckpointStatus) {
+                        ForEach(AnalysisDocument.ExperimentCheckpoint.Status.allCases, id: \.self) { status in
+                            Text(experimentCheckpointStatusTitle(status)).tag(status)
+                        }
+                    }
+                    .font(.caption)
+                    Picker("Linked synthesis", selection: $selectedExperimentSynthesisBlockID) {
+                        Text("None").tag(UUID?.none)
+                        ForEach(synthesisCandidates) { block in
+                            Text(block.title).tag(Optional(block.id))
+                        }
+                    }
+                    .font(.caption)
+                    if experimentCheckpointStatus == .stopped {
+                        TextField("Deviation / stop reason", text: $experimentDeviationNote, axis: .vertical)
+                            .font(.caption)
+                            .lineLimit(2...3)
+                    }
+                    TextField("Next step", text: $experimentNextStep, axis: .vertical)
+                        .font(.caption)
+                        .lineLimit(2...3)
+                    Button("Record Checkpoint") { recordExperimentCheckpoint() }
+                        .font(.caption)
+                        .disabled(
+                            documentRecomputing || selectedRunCount == 0
+                                || (experimentCheckpointStatus == .completed
+                                    && selectedRunCount != plannedArmCount)
+                                || (experimentCheckpointStatus == .stopped
+                                    && experimentDeviationNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                || experimentNextStep.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                }
+            }
+            ForEach(document.blocks) { block in
+                if case .experimentCheckpoint(let checkpoint) = block.payload {
+                    experimentCheckpointRow(checkpoint, state: block.state, in: document)
+                }
+            }
+        }
+    }
+
+    private func experimentModelSelectionBinding(for blockID: UUID) -> Binding<Bool> {
+        Binding(
+            get: { selectedExperimentModelBlockIDs.contains(blockID) },
+            set: { isSelected in
+                if isSelected {
+                    selectedExperimentModelBlockIDs.insert(blockID)
+                } else {
+                    selectedExperimentModelBlockIDs.remove(blockID)
+                }
+            }
+        )
+    }
+
+    private func experimentRunSelectionBinding(for blockID: UUID) -> Binding<Bool> {
+        Binding(
+            get: { selectedExperimentRunBlockIDs.contains(blockID) },
+            set: { isSelected in
+                if isSelected {
+                    selectedExperimentRunBlockIDs.insert(blockID)
+                } else {
+                    selectedExperimentRunBlockIDs.remove(blockID)
+                }
+            }
+        )
+    }
+
+    private func experimentProtocolTitle(_ block: AnalysisDocument.Block) -> String {
+        guard case .experimentProtocol(let protocolValue) = block.payload else { return block.title }
+        return "\(block.title) · \(protocolValue.arms.count) arms"
+    }
+
+    private func experimentRunTitle(_ block: AnalysisDocument.Block, in document: AnalysisDocument) -> String {
+        guard case .run(let run) = block.payload else { return block.title }
+        let modelTitle = document.blocks.first(where: { $0.id == run.modelBlockID })?.title ?? "model"
+        return "\(modelTitle) · \(run.retainedObservationCount ?? 0) rows"
+    }
+
+    private func experimentCheckpointStatusTitle(
+        _ status: AnalysisDocument.ExperimentCheckpoint.Status
+    ) -> String {
+        switch status {
+        case .inProgress: return "In progress"
+        case .completed: return "Completed"
+        case .stopped: return "Stopped"
+        }
+    }
+
+    @ViewBuilder
+    private func experimentCheckpointRow(
+        _ checkpoint: AnalysisDocument.ExperimentCheckpoint,
+        state: AnalysisDocument.BlockState, in document: AnalysisDocument
+    ) -> some View {
+        let protocolTitle = document.blocks.first(where: { $0.id == checkpoint.protocolBlockID })?.title
+            ?? "missing protocol"
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(protocolTitle) · \(experimentCheckpointStatusTitle(checkpoint.status)) · \(checkpoint.armRuns.count) arms")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(state == .current ? Color.accentColor : .orange)
+            if let deviation = checkpoint.deviationNote {
+                Text("Deviation: \(deviation)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            Text("Next: \(checkpoint.nextStep)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -1757,6 +2007,8 @@ struct ContentView: View {
         case .advancedEvidence: "checklist"
         case .comparison: "arrow.left.arrow.right.circle"
         case .synthesis: "text.badge.checkmark"
+        case .experimentProtocol: "point.3.connected.trianglepath.dotted"
+        case .experimentCheckpoint: "flag.checkered"
         case .figure: "chart.xyaxis.line"
         case .note: "note.text"
         }
@@ -1817,6 +2069,10 @@ struct ContentView: View {
                 .compactMap { $0 }.joined(separator: " · ")
         case .synthesis(let synthesis):
             return "\(evidenceSynthesisAssessmentTitle(synthesis.assessment)) · \(synthesis.evidenceBlockIDs.count) cited blocks · \(synthesis.conclusion)"
+        case .experimentProtocol(let protocolValue):
+            return "\(protocolValue.arms.count) arms · \(protocolValue.primaryEndpoint) · \(protocolValue.decisionRule)"
+        case .experimentCheckpoint(let checkpoint):
+            return "\(experimentCheckpointStatusTitle(checkpoint.status)) · \(checkpoint.armRuns.count) arms · next: \(checkpoint.nextStep)"
         case .figure(let figure): return figure.caption
         case .note(let text): return text
         }
