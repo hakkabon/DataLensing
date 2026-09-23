@@ -1502,8 +1502,30 @@ private func linearFixture(n: Int = 25) -> (trainX: [[Double]], trainY: [Double]
     let nonComparable = try #require({ if case .comparison(let value) = nonComparableBlock.payload { return value }; return nil }())
     #expect(nonComparable.verdict == .validationConfigurationMismatch)
 
+    let synthesisID = try document.recordEvidenceSynthesis(
+        title: "GAM evidence synthesis",
+        question: "Does the narrower GAM improve held-out performance?",
+        conclusion: "The paired validation record supports the narrower candidate for this source and fold plan.",
+        assessment: .supported,
+        caveats: ["This is held-out predictive evidence, not a causal conclusion."],
+        evidenceBlockIDs: [comparisonID], at: startedAt.addingTimeInterval(4)
+    )
+    let synthesisBlock = try #require(document.blocks.first(where: { $0.id == synthesisID }))
+    let synthesis = try #require({ if case .synthesis(let value) = synthesisBlock.payload { return value }; return nil }())
+    #expect(synthesis.evidenceBlockIDs == [comparisonID])
+    #expect(synthesis.assessment == .supported)
+    #expect(document.evidenceSynthesisBlocks.map(\.id) == [synthesisID])
+    #expect(throws: AnalysisDocumentError.invalidConfiguration) {
+        _ = try document.recordEvidenceSynthesis(
+            title: "Invalid synthesis", question: "Question", conclusion: "Conclusion",
+            assessment: .inconclusive, caveats: ["A caveat"],
+            evidenceBlockIDs: [baselineRunBlock.id]
+        )
+    }
+
     _ = try document.update(blockID: baselineModel.id, payload: .advancedModel(baselineRecipe))
     #expect(document.blocks.first(where: { $0.id == comparisonID })?.state == .stale)
+    #expect(document.blocks.first(where: { $0.id == synthesisID })?.state == .stale)
     #expect(try AnalysisDocument(jsonData: document.jsonData()) == document)
 }
 

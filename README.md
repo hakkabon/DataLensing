@@ -230,6 +230,15 @@ solver, bootstrap, environment, and terminal-outcome fields. Older documents
 remain readable with an explicit “environment unavailable” result rather than a
 fabricated match.
 
+Evidence synthesis is the notebook's explicit interpretation layer. An analyst
+can record a question, a written conclusion, its qualitative assessment
+(supported, mixed, or inconclusive), and one or more mandatory caveats over
+selected frozen validation/evidence or paired-comparison blocks. A synthesis
+does not run a model, manufacture a statistical verdict, or license a causal
+claim: it is accountable prose with direct dependencies. If any cited evidence
+becomes stale, the synthesis becomes stale too; the historical conclusion and
+its original references remain readable for review.
+
 Validation plans are now first-class notebook blocks. A plan records fold
 construction (shuffled, blocked ordered/spatial, or binary-stratified), its
 deterministic seed, optional bootstrap policy, and an optional comparison cohort.

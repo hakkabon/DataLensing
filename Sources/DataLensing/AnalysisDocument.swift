@@ -11,7 +11,7 @@ import Foundation
 /// executable code, so the same document can be inspected and replayed on
 /// macOS and iPadOS.
 public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public let id: UUID
     public let schemaVersion: Int
@@ -609,6 +609,62 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// An analyst-authored, reviewable conclusion over selected frozen evidence.
+    ///
+    /// A synthesis records interpretation; it does not compute a new score or
+    /// turn an observational result into a causal claim. Its direct inputs are
+    /// evidence or comparison blocks, which ensures an upstream edit makes the
+    /// conclusion visibly stale instead of leaving prose detached from its
+    /// supporting record.
+    public struct EvidenceSynthesis: Codable, Sendable, Hashable {
+        public enum Assessment: String, Codable, Sendable, Hashable, CaseIterable {
+            /// The cited record coherently supports the written conclusion.
+            case supported
+            /// The cited record contains materially conflicting indications.
+            case mixed
+            /// The cited record cannot support a reliable conclusion yet.
+            case inconclusive
+        }
+
+        public let capturedAt: Date
+        public let question: String
+        public let conclusion: String
+        public let assessment: Assessment
+        /// Explicit qualifications that a reader must retain with the conclusion.
+        public let caveats: [String]
+        /// Ordered direct inputs to the synthesis block.
+        public let evidenceBlockIDs: [UUID]
+
+        public init(
+            capturedAt: Date = Date(), question: String, conclusion: String,
+            assessment: Assessment, caveats: [String], evidenceBlockIDs: [UUID]
+        ) throws {
+            let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedConclusion = conclusion.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedCaveats = caveats.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !normalizedQuestion.isEmpty, !normalizedConclusion.isEmpty,
+                  !normalizedCaveats.isEmpty, normalizedCaveats.allSatisfy({ !$0.isEmpty }),
+                  !evidenceBlockIDs.isEmpty, Set(evidenceBlockIDs).count == evidenceBlockIDs.count else {
+                throw AnalysisDocumentError.invalidConfiguration
+            }
+            self.capturedAt = capturedAt
+            self.question = normalizedQuestion
+            self.conclusion = normalizedConclusion
+            self.assessment = assessment
+            self.caveats = normalizedCaveats
+            self.evidenceBlockIDs = evidenceBlockIDs
+        }
+
+        fileprivate var isValid: Bool {
+            (try? Self(
+                capturedAt: capturedAt, question: question, conclusion: conclusion,
+                assessment: assessment, caveats: caveats, evidenceBlockIDs: evidenceBlockIDs
+            )) != nil
+        }
+    }
+
     /// Numerical and package-resolution context captured with an explicit run.
     ///
     /// The record identifies the shipped numerical stack and runtime target;
@@ -947,6 +1003,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         case evidence(EvidenceSnapshot)
         case advancedEvidence(AdvancedModelEvidence)
         case comparison(ComparativeEvidence)
+        case synthesis(EvidenceSynthesis)
         case figure(FigureAnnotation)
         case note(String)
     }
@@ -1008,6 +1065,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             case .evidence(let evidence): return evidence.isValid
             case .advancedEvidence(let evidence): return evidence.isValid
             case .comparison(let comparison): return comparison.isValid
+            case .synthesis(let synthesis): return synthesis.isValid
             case .figure(let figure): return figure.isValid
             case .note(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -1118,7 +1176,7 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                     preparation.append(block.id)
                 case .validationPlan, .model, .advancedModel:
                     methods.append(block.id)
-                case .run, .evidence, .advancedEvidence, .comparison, .figure, .note:
+                case .run, .evidence, .advancedEvidence, .comparison, .synthesis, .figure, .note:
                     evidence.append(block.id)
                 }
             }
@@ -1488,6 +1546,28 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// Current frozen evidence that may be cited by an analyst-authored
+    /// synthesis. Runs are intentionally excluded: a conclusion must cite the
+    /// diagnostic/validation snapshot or a paired comparison, not an execution
+    /// record alone.
+    public var synthesisCandidateEvidenceBlocks: [Block] {
+        blocks.filter { block in
+            guard block.state == .current else { return false }
+            switch block.payload {
+            case .evidence, .advancedEvidence, .comparison:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Saved analyst conclusions in notebook order, including stale historical
+    /// conclusions retained for audit and review.
+    public var evidenceSynthesisBlocks: [Block] {
+        blocks.filter { if case .synthesis = $0.payload { return true }; return false }
+    }
+
     /// Add one immutable comparison block. The block retains both runs and
     /// evidence blocks as direct inputs, so later upstream edits make the
     /// comparison visibly stale rather than silently reusing it.
@@ -1526,6 +1606,40 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
                 baselineEvidenceBlock.id, candidateEvidenceBlock.id,
             ],
             payload: .comparison(comparison), createdAt: date, updatedAt: date
+        )
+        try append(block, at: date)
+        return block.id
+    }
+
+    /// Record a human interpretation of one or more current frozen evidence
+    /// blocks. This has no fitting side effect and cannot reference a result
+    /// that is already stale or absent from the notebook.
+    @discardableResult
+    public mutating func recordEvidenceSynthesis(
+        title: String, question: String, conclusion: String,
+        assessment: EvidenceSynthesis.Assessment, caveats: [String],
+        evidenceBlockIDs: [UUID], at date: Date = Date()
+    ) throws -> UUID {
+        let synthesis = try EvidenceSynthesis(
+            capturedAt: date, question: question, conclusion: conclusion,
+            assessment: assessment, caveats: caveats, evidenceBlockIDs: evidenceBlockIDs
+        )
+        guard evidenceBlockIDs.allSatisfy({ id in
+            guard let block = blocks.first(where: { $0.id == id }), block.state == .current else {
+                return false
+            }
+            switch block.payload {
+            case .evidence, .advancedEvidence, .comparison:
+                return true
+            default:
+                return false
+            }
+        }) else {
+            throw AnalysisDocumentError.invalidConfiguration
+        }
+        let block = try Block(
+            title: title, upstreamBlockIDs: evidenceBlockIDs, payload: .synthesis(synthesis),
+            createdAt: date, updatedAt: date
         )
         try append(block, at: date)
         return block.id
@@ -1797,8 +1911,9 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
         // fit policy and observed scale selection; version 8 predates portable
         // review findings and explicit readiness; version 9 predates frozen
         // comparative evidence; version 10 predates execution-environment
-        // snapshots. Existing representation is unchanged, so normalize on
-        // open and write the upgraded schema only when the host later saves.
+        // snapshots; version 11 predates evidence-synthesis blocks. Existing
+        // representation is unchanged, so normalize on open and write the
+        // upgraded schema only when the host later saves.
         schemaVersion = Self.currentSchemaVersion
         try validate()
     }
@@ -1864,6 +1979,10 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             }
             if case .comparison(let comparison) = block.payload,
                !isValidComparisonDependency(block, comparison: comparison) {
+                throw AnalysisDocumentError.invalidEvidence(block.id)
+            }
+            if case .synthesis(let synthesis) = block.payload,
+               !isValidSynthesisDependency(block, synthesis: synthesis) {
                 throw AnalysisDocumentError.invalidEvidence(block.id)
             }
             if case .model(let recipe) = block.payload,
@@ -1973,6 +2092,26 @@ public struct AnalysisDocument: Codable, Sendable, Hashable, Identifiable {
             candidateEvidenceBlockID: candidateEvidenceBlock.id, at: comparison.capturedAt
         ) else { return false }
         return expected == comparison
+    }
+
+    private func isValidSynthesisDependency(_ block: Block, synthesis: EvidenceSynthesis) -> Bool {
+        guard block.upstreamBlockIDs == synthesis.evidenceBlockIDs,
+              !synthesis.evidenceBlockIDs.isEmpty else { return false }
+        for id in synthesis.evidenceBlockIDs {
+            guard let evidenceBlock = blocks.first(where: { $0.id == id }) else { return false }
+            switch evidenceBlock.payload {
+            case .evidence, .advancedEvidence, .comparison:
+                break
+            default:
+                return false
+            }
+            // An historical conclusion stays readable after changes, but a
+            // current conclusion must never be attached to stale evidence.
+            if block.state == .current && evidenceBlock.state != .current {
+                return false
+            }
+        }
+        return true
     }
 
     private func hasDirectCompletedRunDependency(_ block: Block) -> Bool {

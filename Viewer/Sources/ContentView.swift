@@ -209,6 +209,12 @@ struct ContentView: View {
     @State private var reviewResolution = ""
     @State private var selectedComparisonBaselineRunID: UUID?
     @State private var selectedComparisonCandidateRunID: UUID?
+    @State private var evidenceSynthesisTitle = "Evidence synthesis"
+    @State private var evidenceSynthesisQuestion = ""
+    @State private var evidenceSynthesisConclusion = ""
+    @State private var evidenceSynthesisAssessment: AnalysisDocument.EvidenceSynthesis.Assessment = .inconclusive
+    @State private var evidenceSynthesisCaveats = ""
+    @State private var selectedSynthesisEvidenceBlockIDs = Set<UUID>()
     @State private var selectedRunDiffBaselineID: UUID?
     @State private var selectedRunDiffCandidateID: UUID?
     @State private var advancedTask: Task<Void, Never>?
@@ -520,6 +526,8 @@ struct ContentView: View {
                     reproducibilityPanel(for: document)
 
                     comparativeEvidencePanel(for: document)
+
+                    evidenceSynthesisPanel(for: document)
 
                     Button("Save Document…") { saveDocument() }
                         .disabled(documentRecomputing)
@@ -1191,6 +1199,28 @@ struct ContentView: View {
         }
     }
 
+    private func recordEvidenceSynthesis() {
+        guard var document = analysisDocument else { return }
+        documentError = nil
+        let caveats = evidenceSynthesisCaveats.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        do {
+            _ = try document.recordEvidenceSynthesis(
+                title: evidenceSynthesisTitle, question: evidenceSynthesisQuestion,
+                conclusion: evidenceSynthesisConclusion,
+                assessment: evidenceSynthesisAssessment, caveats: caveats,
+                evidenceBlockIDs: document.synthesisCandidateEvidenceBlocks
+                    .filter { selectedSynthesisEvidenceBlockIDs.contains($0.id) }
+                    .map(\.id)
+            )
+            analysisDocument = document
+            selectedSynthesisEvidenceBlockIDs.removeAll()
+        } catch {
+            documentError = String(describing: error)
+        }
+    }
+
     @ViewBuilder
     private func reviewPanel(for document: AnalysisDocument) -> some View {
         let summary = document.reviewSummary
@@ -1551,6 +1581,117 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func evidenceSynthesisPanel(for document: AnalysisDocument) -> some View {
+        let candidates = document.synthesisCandidateEvidenceBlocks
+        let syntheses = document.evidenceSynthesisBlocks
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Evidence synthesis", systemImage: "text.badge.checkmark")
+                .font(.caption.weight(.semibold))
+            Text("Records an analyst conclusion over selected frozen evidence. It is interpretation, not an automatic verdict; every conclusion must retain its caveats.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if candidates.isEmpty {
+                Text("Record validation evidence or a paired comparison before writing a synthesis.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                TextField("Synthesis title", text: $evidenceSynthesisTitle)
+                    .font(.caption)
+                TextField("Question", text: $evidenceSynthesisQuestion)
+                    .font(.caption)
+                TextField("Conclusion", text: $evidenceSynthesisConclusion)
+                    .font(.caption)
+                Picker("Assessment", selection: $evidenceSynthesisAssessment) {
+                    ForEach(AnalysisDocument.EvidenceSynthesis.Assessment.allCases, id: \.self) { assessment in
+                        Text(evidenceSynthesisAssessmentTitle(assessment)).tag(assessment)
+                    }
+                }
+                .font(.caption)
+                TextField("One caveat per line", text: $evidenceSynthesisCaveats, axis: .vertical)
+                    .font(.caption)
+                    .lineLimit(2...4)
+                Text("Cite frozen evidence")
+                    .font(.caption2.weight(.medium))
+                ForEach(candidates) { block in
+                    Toggle(synthesisEvidenceTitle(block), isOn: synthesisEvidenceSelectionBinding(for: block.id))
+                        .font(.caption2)
+                }
+                Button("Record Synthesis") { recordEvidenceSynthesis() }
+                    .font(.caption)
+                    .disabled(
+                        documentRecomputing || selectedSynthesisEvidenceBlockIDs.isEmpty
+                            || evidenceSynthesisTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || evidenceSynthesisQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || evidenceSynthesisConclusion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || evidenceSynthesisCaveats.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+            }
+            ForEach(syntheses) { block in
+                if case .synthesis(let synthesis) = block.payload {
+                    evidenceSynthesisRow(synthesis, state: block.state)
+                }
+            }
+        }
+    }
+
+    private func synthesisEvidenceSelectionBinding(for blockID: UUID) -> Binding<Bool> {
+        Binding(
+            get: { selectedSynthesisEvidenceBlockIDs.contains(blockID) },
+            set: { isSelected in
+                if isSelected {
+                    selectedSynthesisEvidenceBlockIDs.insert(blockID)
+                } else {
+                    selectedSynthesisEvidenceBlockIDs.remove(blockID)
+                }
+            }
+        )
+    }
+
+    private func evidenceSynthesisAssessmentTitle(
+        _ assessment: AnalysisDocument.EvidenceSynthesis.Assessment
+    ) -> String {
+        switch assessment {
+        case .supported: return "Supported by cited evidence"
+        case .mixed: return "Mixed evidence"
+        case .inconclusive: return "Inconclusive evidence"
+        }
+    }
+
+    private func synthesisEvidenceTitle(_ block: AnalysisDocument.Block) -> String {
+        switch block.payload {
+        case .evidence:
+            return "Validation: \(block.title)"
+        case .advancedEvidence:
+            return "Advanced validation: \(block.title)"
+        case .comparison:
+            return "Comparison: \(block.title)"
+        default:
+            return block.title
+        }
+    }
+
+    @ViewBuilder
+    private func evidenceSynthesisRow(
+        _ synthesis: AnalysisDocument.EvidenceSynthesis, state: AnalysisDocument.BlockState
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(evidenceSynthesisAssessmentTitle(synthesis.assessment)) · \(synthesis.evidenceBlockIDs.count) cited blocks")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(state == .current ? Color.accentColor : .orange)
+            Text(synthesis.question)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(synthesis.conclusion)
+                .font(.caption2)
+            Text("Caveats: \(synthesis.caveats.joined(separator: " · "))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    @ViewBuilder
     private func numericalExecutionPanel(for document: AnalysisDocument) -> some View {
         if let evidence = latestAdvancedEvidence(in: document),
            let requested = evidence.requestedSolverPreference {
@@ -1615,6 +1756,7 @@ struct ContentView: View {
         case .evidence: "checklist"
         case .advancedEvidence: "checklist"
         case .comparison: "arrow.left.arrow.right.circle"
+        case .synthesis: "text.badge.checkmark"
         case .figure: "chart.xyaxis.line"
         case .note: "note.text"
         }
@@ -1673,6 +1815,8 @@ struct ContentView: View {
             return [comparison.responseFamily?.rawValue, difference,
                     "\(comparison.candidateWinCount)/\(comparison.pairedObservationCount) candidate wins"]
                 .compactMap { $0 }.joined(separator: " · ")
+        case .synthesis(let synthesis):
+            return "\(evidenceSynthesisAssessmentTitle(synthesis.assessment)) · \(synthesis.evidenceBlockIDs.count) cited blocks · \(synthesis.conclusion)"
         case .figure(let figure): return figure.caption
         case .note(let text): return text
         }
